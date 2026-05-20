@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Penthos Office</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #0a0a0f;
+      overflow: hidden;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: #d8d8e0;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    #game {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    #game canvas {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      display: block;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@4.1.0/dist/phaser.min.js"></script>
+</head>
+<body>
+  <div id="game"></div>
+  <script>
+    const BUILD_VERSION = "2026-05-20T00:00:00Z";
+
+    class OfficeScene extends Phaser.Scene {
+      constructor() {
+        super({ key: "OfficeScene" });
+      }
+
+      preload() {
+        this.load.spritesheet("dungeon", "assets/sprites/dungeon.png", {
+          frameWidth: 16,
+          frameHeight: 16
+        });
+        this.load.spritesheet("town", "assets/sprites/town.png", {
+          frameWidth: 16,
+          frameHeight: 16
+        });
+        this.load.json("agents", "agents.json");
+      }
+
+      create() {
+        const TILE = 16;
+        const SCALE = 3;
+        const DRAW = TILE * SCALE; // 48 px on screen
+        const COLS = 20;
+        const ROWS = 13;
+        const officeW = COLS * DRAW; // 960
+        const officeH = ROWS * DRAW; // 624
+        const offsetX = Math.floor((1280 - officeW) / 2); // 160
+        const offsetY = Math.floor((720 - officeH) / 2);  // 48
+
+        // Tiny Dungeon frame picks (12x11 grid, 0-indexed)
+        const FLOOR        = 48;
+        const FLOOR_ALT    = 49;
+        const WALL_TOP     = 40;
+        const WALL_SIDE    = 1;
+        const WALL_INNER   = 0;
+        const BOOKSHELF    = 60;
+        const CHEST        = 89;
+        const TABLE        = 75;
+        const TORCH        = 88;
+
+        const place = (col, row, frame) => {
+          const x = offsetX + col * DRAW + DRAW / 2;
+          const y = offsetY + row * DRAW + DRAW / 2;
+          return this.add.sprite(x, y, "dungeon", frame).setScale(SCALE);
+        };
+
+        // Floor everywhere inside
+        for (let r = 1; r < ROWS - 1; r++) {
+          for (let c = 1; c < COLS - 1; c++) {
+            const frame = (c + r) % 7 === 0 ? FLOOR_ALT : FLOOR;
+            place(c, r, frame);
+          }
+        }
+
+        // Outer wall
+        for (let c = 0; c < COLS; c++) {
+          place(c, 0, WALL_TOP);
+          place(c, ROWS - 1, WALL_TOP);
+        }
+        for (let r = 1; r < ROWS - 1; r++) {
+          place(0, r, WALL_INNER);
+          place(COLS - 1, r, WALL_INNER);
+        }
+
+        // ── CEO area (top-left): table + bookshelves on wall
+        place(2, 1, BOOKSHELF);
+        place(3, 1, BOOKSHELF);
+        place(4, 1, BOOKSHELF);
+        place(2, 3, TABLE);
+        place(3, 3, TABLE);
+        place(1, 2, TORCH);
+
+        // ── Server room (right side): chests in 2 columns acting as racks
+        for (let r = 2; r <= 8; r++) {
+          place(COLS - 3, r, CHEST);
+          place(COLS - 4, r, CHEST);
+        }
+        place(COLS - 2, 1, TORCH);
+
+        // ── Aktenraum (bottom): bookshelves in a long row as filing cabinets
+        for (let c = 5; c <= 13; c++) {
+          place(c, ROWS - 3, BOOKSHELF);
+        }
+        place(4, ROWS - 2, TORCH);
+        place(14, ROWS - 2, TORCH);
+
+        // ── Agents
+        const agents = this.cache.json.get("agents");
+        agents.forEach(agent => {
+          const animKey = `${agent.id}-idle`;
+          if (!this.anims.exists(animKey)) {
+            this.anims.create({
+              key: animKey,
+              frames: this.anims.generateFrameNumbers(agent.spritesheetKey, {
+                frames: agent.idleFrames
+              }),
+              frameRate: 2,
+              repeat: -1,
+              yoyo: true
+            });
+          }
+          const sprite = this.add
+            .sprite(agent.homeX, agent.homeY, agent.spritesheetKey, agent.idleFrames[0])
+            .setScale(SCALE);
+          sprite.play(animKey);
+
+          this.add
+            .text(agent.homeX, agent.homeY - DRAW / 2 - 8, agent.displayName, {
+              fontFamily: "ui-monospace, monospace",
+              fontSize: "12px",
+              color: "#e6e6f0",
+              backgroundColor: "#0a0a0fcc",
+              padding: { left: 4, right: 4, top: 1, bottom: 1 }
+            })
+            .setOrigin(0.5, 1)
+            .setAlpha(0.85);
+        });
+
+        // Build version bottom-right
+        this.add
+          .text(1276, 716, `build ${BUILD_VERSION}`, {
+            fontFamily: "ui-monospace, monospace",
+            fontSize: "10px",
+            color: "#7a7a8a"
+          })
+          .setOrigin(1, 1)
+          .setAlpha(0.5);
+      }
+    }
+
+    const config = {
+      type: Phaser.AUTO,
+      parent: "game",
+      width: 1280,
+      height: 720,
+      backgroundColor: "#0a0a0f",
+      pixelArt: true,
+      antialias: false,
+      roundPixels: true,
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH
+      },
+      scene: [OfficeScene]
+    };
+
+    new Phaser.Game(config);
+  </script>
+</body>
+</html>

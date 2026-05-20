@@ -1,0 +1,32 @@
+[
+  {
+    "id": "paul",
+    "displayName": "Paul",
+    "role": "CEO",
+    "spritesheetKey": "dungeon",
+    "idleFrames": [96, 97],
+    "homeX": 320,
+    "homeY": 260,
+    "stations": {}
+  },
+  {
+    "id": "dartagnan",
+    "displayName": "D'Artagnan",
+    "role": "Server Wrangler",
+    "spritesheetKey": "dungeon",
+    "idleFrames": [98, 99],
+    "homeX": 940,
+    "homeY": 360,
+    "stations": {}
+  },
+  {
+    "id": "porthos",
+    "displayName": "Porthos",
+    "role": "Archivist",
+    "spritesheetKey": "dungeon",
+    "idleFrames": [100, 101],
+    "homeX": 640,
+    "homeY": 560,
+    "stations": {}
+  }
+]
