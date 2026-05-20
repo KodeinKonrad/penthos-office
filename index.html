@@ -32,7 +32,7 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-20T21:00:00Z";
+    const BUILD_VERSION = "2026-05-20T22:15:00Z";
     const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
 
     // Modern_Office_16x16.png (16 cols × 53 rows)
@@ -68,7 +68,7 @@
         this.load.spritesheet("walls",     "assets/sprites/interior_walls.png",     { frameWidth: 16, frameHeight: 16 });
         this.load.spritesheet("office",    "assets/sprites/office_furniture.png",  { frameWidth: 16, frameHeight: 16 });
         this.load.spritesheet("furniture", "assets/sprites/interior_furniture.png", { frameWidth: 16, frameHeight: 16 });
-        this.load.json("agents", "agents.json");
+        this.load.json("agents", "agents.json?v=" + encodeURIComponent(BUILD_VERSION));
       }
 
       create() {
@@ -213,8 +213,12 @@
             }
           });
 
-          // Sprite — chibi 16×16 scaled 3×, origin at feet
-          let currentFrame = agent.idleFrame;
+          // Sprite — chibi 16×16 scaled 3×, origin at feet.
+          // Guard against stale/partial agents.json where idleFrame is missing:
+          // Phaser silently falls back to frame 0 if frame is undefined, which renders
+          // a tiny back-of-head blob and looks like the char vanished.
+          const safeIdle = (typeof agent.idleFrame === "number") ? agent.idleFrame : 59;
+          let currentFrame = safeIdle;
           const s = this.add
             .sprite(agent.homeX, agent.homeY, agent.spritesheetKey, currentFrame)
             .setScale(SCALE)

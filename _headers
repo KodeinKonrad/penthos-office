@@ -4,5 +4,8 @@
 /index.html
   Cache-Control: no-cache, must-revalidate
 
+/agents.json
+  Cache-Control: no-cache, must-revalidate
+
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
