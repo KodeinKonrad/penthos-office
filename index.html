@@ -21,10 +21,6 @@
       justify-content: center;
       min-height: 100vh;
     }
-    #game {
-      image-rendering: pixelated;
-      image-rendering: crisp-edges;
-    }
     #game canvas {
       image-rendering: pixelated;
       image-rendering: crisp-edges;
@@ -36,7 +32,31 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-20T00:00:00Z";
+    const BUILD_VERSION = "2026-05-20T15:00:00Z";
+
+    // ── Office furniture sheet (Modern_Office_16x16.png, 16 cols × 53 rows)
+    // Frame indices below are educated picks; tune freely.
+    const OFFICE = {
+      DESK_TOP_L:   0,    // top-left of a horizontal desk strip
+      DESK_TOP_M:   1,
+      DESK_TOP_R:   2,
+      DESK_MID_L:  16,
+      DESK_MID_M:  17,
+      DESK_MID_R:  18,
+      OFFICE_CHAIR_FRONT: 32,
+      OFFICE_CHAIR_BACK:  33,
+      PLANT_BIG:   53,
+      PLANT_SMALL: 54,
+      MONITOR_OFF: 86,
+      PC_TOWER:    88,
+      KEYBOARD:    96,
+      SERVER_RACK_TOP:    240,
+      SERVER_RACK_BOTTOM: 256,
+      FILING_CABINET_TOP:    192,
+      FILING_CABINET_BOTTOM: 208,
+      PRINTER:     176,
+      COFFEE:       70
+    };
 
     class OfficeScene extends Phaser.Scene {
       constructor() {
@@ -44,126 +64,223 @@
       }
 
       preload() {
-        this.load.spritesheet("dungeon", "assets/sprites/dungeon.png", {
-          frameWidth: 16,
-          frameHeight: 16
-        });
-        this.load.spritesheet("town", "assets/sprites/town.png", {
-          frameWidth: 16,
-          frameHeight: 16
-        });
+        // Tilesets
+        this.load.spritesheet("walls",     "assets/sprites/interior_walls.png",     { frameWidth: 16, frameHeight: 16 });
+        this.load.spritesheet("furniture", "assets/sprites/interior_furniture.png", { frameWidth: 16, frameHeight: 16 });
+        this.load.spritesheet("office",    "assets/sprites/office_furniture.png",  { frameWidth: 16, frameHeight: 16 });
+
+        // Agents
         this.load.json("agents", "agents.json");
+        // Characters loaded dynamically below per agent
+        // We pre-register names so create() can rely on them.
+        // (load order is queued; characters loaded via dynamic this.load below)
+        this._agentsPreloadStarted = false;
       }
 
-      create() {
-        const TILE = 16;
+      create(data) {
+        // Now that agents.json is loaded, kick a second load wave for characters.
+        const agents = this.cache.json.get("agents");
+        if (!this._charsLoaded) {
+          this._charsLoaded = true;
+          agents.forEach(a => {
+            this.load.spritesheet(a.spritesheetKey, a.spritesheetPath, {
+              frameWidth: 16,
+              frameHeight: 32
+            });
+          });
+          this.load.once("complete", () => this._buildScene(agents));
+          this.load.start();
+        } else {
+          this._buildScene(agents);
+        }
+      }
+
+      _buildScene(agents) {
+        const W = 1280, H = 720;
         const SCALE = 3;
-        const DRAW = TILE * SCALE; // 48 px on screen
-        const COLS = 20;
-        const ROWS = 13;
-        const officeW = COLS * DRAW; // 960
-        const officeH = ROWS * DRAW; // 624
-        const offsetX = Math.floor((1280 - officeW) / 2); // 160
-        const offsetY = Math.floor((720 - officeH) / 2);  // 48
 
-        // Tiny Dungeon frame picks (12x11 grid, 0-indexed)
-        const FLOOR        = 48;
-        const FLOOR_ALT    = 49;
-        const WALL_TOP     = 40;
-        const WALL_SIDE    = 1;
-        const WALL_INNER   = 0;
-        const BOOKSHELF    = 60;
-        const CHEST        = 89;
-        const TABLE        = 75;
-        const TORCH        = 88;
+        // ── Floor: solid warm wood color, full canvas
+        this.add.rectangle(W / 2, H / 2, W, H, 0x9c8060);
 
-        const place = (col, row, frame) => {
-          const x = offsetX + col * DRAW + DRAW / 2;
-          const y = offsetY + row * DRAW + DRAW / 2;
-          return this.add.sprite(x, y, "dungeon", frame).setScale(SCALE);
+        // Subtle floor grid for "tiled" feel — thin lines every 48px (= 1 tile × scale 3)
+        const grid = this.add.graphics();
+        grid.lineStyle(1, 0x8a6f50, 0.35);
+        for (let x = 0; x <= W; x += 48) {
+          grid.lineBetween(x, 0, x, H);
+        }
+        for (let y = 0; y <= H; y += 48) {
+          grid.lineBetween(0, y, W, y);
+        }
+
+        // ── Outer wall (thick dark border)
+        const WALL = 0x2a2429;
+        const WALL_HL = 0x4a3f47;
+        const T = 16; // wall thickness in screen pixels
+        this.add.rectangle(W / 2, T / 2,        W, T, WALL); // top
+        this.add.rectangle(W / 2, H - T / 2,    W, T, WALL); // bottom
+        this.add.rectangle(T / 2, H / 2,        T, H, WALL); // left
+        this.add.rectangle(W - T / 2, H / 2,    T, H, WALL); // right
+
+        // Light highlight strip under top wall (cosmetic)
+        this.add.rectangle(W / 2, T + 1, W - 2 * T, 2, WALL_HL).setAlpha(0.6);
+
+        // ── Internal area dividers
+        // CEO area: top-left rectangle (≈ left third × top half)
+        // Server room: right side (≈ right third × top 2/3)
+        // Aktenraum: bottom strip (full width below)
+        const CEO_W = 420, CEO_H = 270;
+        const SVR_W = 360, SVR_H = 360;
+        const AKT_W = W - 2 * T, AKT_H = 200;
+
+        // Wall between CEO and middle (vertical wall at x=CEO_W)
+        this.add.rectangle(CEO_W, T + CEO_H / 2, T, CEO_H, WALL);
+        // Wall under CEO (horizontal at y=T+CEO_H)
+        this.add.rectangle(T + CEO_W / 2 - T / 2, T + CEO_H, CEO_W - T, T, WALL);
+
+        // Wall between server room and middle
+        const svrX = W - SVR_W;
+        this.add.rectangle(svrX, T + SVR_H / 2, T, SVR_H, WALL);
+        // Wall under server room
+        this.add.rectangle(svrX + (W - svrX) / 2 - T / 2, T + SVR_H, (W - svrX) - T, T, WALL);
+
+        // Wall above Aktenraum
+        const aktY = H - AKT_H;
+        this.add.rectangle(W / 2, aktY, W - 2 * T, T, WALL);
+
+        // Area labels — small, faint
+        const labelStyle = {
+          fontFamily: "ui-monospace, monospace",
+          fontSize: "11px",
+          color: "#0a0a0f",
+          backgroundColor: "#fffbe8cc",
+          padding: { left: 4, right: 4, top: 1, bottom: 1 }
         };
+        this.add.text(T + 8,  T + 6,            "CEO OFFICE",  labelStyle).setAlpha(0.85);
+        this.add.text(svrX + 8, T + 6,          "SERVER ROOM", labelStyle).setAlpha(0.85);
+        this.add.text(T + 8,  aktY + 6,         "ARCHIVE",     labelStyle).setAlpha(0.85);
+        this.add.text(CEO_W + 16, T + 6,        "RECEPTION",   labelStyle).setAlpha(0.6);
 
-        // Floor everywhere inside
-        for (let r = 1; r < ROWS - 1; r++) {
-          for (let c = 1; c < COLS - 1; c++) {
-            const frame = (c + r) % 7 === 0 ? FLOOR_ALT : FLOOR;
-            place(c, r, frame);
-          }
-        }
+        // ── Furniture placement helpers
+        const sprite = (x, y, key, frame, scale = SCALE) =>
+          this.add.sprite(x, y, key, frame).setScale(scale);
 
-        // Outer wall
-        for (let c = 0; c < COLS; c++) {
-          place(c, 0, WALL_TOP);
-          place(c, ROWS - 1, WALL_TOP);
+        // CEO OFFICE (top-left): desk + chair + plant + bookshelf-ish
+        // Desk = 3 horizontal cells (top + mid stacked = 2 rows × 3 cols)
+        const ceoDeskCx = 200, ceoDeskCy = 150;
+        for (let i = -1; i <= 1; i++) {
+          sprite(ceoDeskCx + i * 16 * SCALE, ceoDeskCy,                OFFICE.DESK_TOP_L + (i + 1));
+          sprite(ceoDeskCx + i * 16 * SCALE, ceoDeskCy + 16 * SCALE,   OFFICE.DESK_MID_L + (i + 1));
         }
-        for (let r = 1; r < ROWS - 1; r++) {
-          place(0, r, WALL_INNER);
-          place(COLS - 1, r, WALL_INNER);
-        }
+        // PC + monitor on desk
+        sprite(ceoDeskCx, ceoDeskCy - 4, OFFICE.MONITOR_OFF);
+        // Plant in corner
+        sprite(T + 40, T + CEO_H - 60, OFFICE.PLANT_BIG);
+        sprite(T + 40, T + CEO_H - 28, OFFICE.PLANT_SMALL);
+        // Filing cabinet (= bookshelf substitute) on top wall
+        sprite(330, T + 70,            OFFICE.FILING_CABINET_TOP);
+        sprite(330, T + 70 + 16*SCALE, OFFICE.FILING_CABINET_BOTTOM);
 
-        // ── CEO area (top-left): table + bookshelves on wall
-        place(2, 1, BOOKSHELF);
-        place(3, 1, BOOKSHELF);
-        place(4, 1, BOOKSHELF);
-        place(2, 3, TABLE);
-        place(3, 3, TABLE);
-        place(1, 2, TORCH);
-
-        // ── Server room (right side): chests in 2 columns acting as racks
-        for (let r = 2; r <= 8; r++) {
-          place(COLS - 3, r, CHEST);
-          place(COLS - 4, r, CHEST);
+        // SERVER ROOM (right): row of 3 server racks + a desk for D'Artagnan
+        const svrRackY = T + 110;
+        for (let i = 0; i < 3; i++) {
+          const rx = svrX + 70 + i * 16 * SCALE * 1.3;
+          sprite(rx, svrRackY,                  OFFICE.SERVER_RACK_TOP);
+          sprite(rx, svrRackY + 16 * SCALE,     OFFICE.SERVER_RACK_BOTTOM);
         }
-        place(COLS - 2, 1, TORCH);
+        // D'Artagnan's desk + PC
+        const dDeskCx = svrX + 130, dDeskCy = T + SVR_H - 80;
+        sprite(dDeskCx - 16 * SCALE, dDeskCy,                 OFFICE.DESK_TOP_L);
+        sprite(dDeskCx,              dDeskCy,                 OFFICE.DESK_TOP_M);
+        sprite(dDeskCx + 16 * SCALE, dDeskCy,                 OFFICE.DESK_TOP_R);
+        sprite(dDeskCx - 16 * SCALE, dDeskCy + 16 * SCALE,    OFFICE.DESK_MID_L);
+        sprite(dDeskCx,              dDeskCy + 16 * SCALE,    OFFICE.DESK_MID_M);
+        sprite(dDeskCx + 16 * SCALE, dDeskCy + 16 * SCALE,    OFFICE.DESK_MID_R);
+        sprite(dDeskCx, dDeskCy - 4, OFFICE.MONITOR_OFF);
+        sprite(dDeskCx + 16 * SCALE, dDeskCy - 4, OFFICE.PC_TOWER);
 
-        // ── Aktenraum (bottom): bookshelves in a long row as filing cabinets
-        for (let c = 5; c <= 13; c++) {
-          place(c, ROWS - 3, BOOKSHELF);
+        // RECEPTION (middle): coffee machine
+        const recCx = CEO_W + 200, recCy = T + 110;
+        sprite(recCx, recCy, OFFICE.COFFEE);
+        // Reception plant
+        sprite(recCx + 80, recCy + 20, OFFICE.PLANT_BIG);
+
+        // ARCHIVE (bottom strip): row of filing cabinets + porthos's desk
+        const aktBaseY = aktY + 80;
+        for (let i = 0; i < 6; i++) {
+          const fx = T + 80 + i * 16 * SCALE * 1.2;
+          sprite(fx, aktBaseY,                  OFFICE.FILING_CABINET_TOP);
+          sprite(fx, aktBaseY + 16 * SCALE,     OFFICE.FILING_CABINET_BOTTOM);
         }
-        place(4, ROWS - 2, TORCH);
-        place(14, ROWS - 2, TORCH);
+        // Printer at end of row
+        sprite(T + 80 + 6 * 16 * SCALE * 1.2 + 40, aktBaseY + 16 * SCALE / 2, OFFICE.PRINTER);
+        // Porthos's desk
+        const pDeskCx = W - 380, pDeskCy = aktBaseY + 30;
+        sprite(pDeskCx - 16 * SCALE, pDeskCy,                 OFFICE.DESK_TOP_L);
+        sprite(pDeskCx,              pDeskCy,                 OFFICE.DESK_TOP_M);
+        sprite(pDeskCx + 16 * SCALE, pDeskCy,                 OFFICE.DESK_TOP_R);
+        sprite(pDeskCx - 16 * SCALE, pDeskCy + 16 * SCALE,    OFFICE.DESK_MID_L);
+        sprite(pDeskCx,              pDeskCy + 16 * SCALE,    OFFICE.DESK_MID_M);
+        sprite(pDeskCx + 16 * SCALE, pDeskCy + 16 * SCALE,    OFFICE.DESK_MID_R);
 
         // ── Agents
-        const agents = this.cache.json.get("agents");
         agents.forEach(agent => {
-          const animKey = `${agent.id}-idle`;
-          if (!this.anims.exists(animKey)) {
-            this.anims.create({
-              key: animKey,
-              frames: this.anims.generateFrameNumbers(agent.spritesheetKey, {
-                frames: agent.idleFrames
-              }),
-              frameRate: 2,
-              repeat: -1,
-              yoyo: true
-            });
-          }
-          const sprite = this.add
-            .sprite(agent.homeX, agent.homeY, agent.spritesheetKey, agent.idleFrames[0])
-            .setScale(SCALE);
-          sprite.play(animKey);
+          // Walk animations
+          const dirs = [
+            { suffix: "down",  frames: agent.walkDownFrames },
+            { suffix: "up",    frames: agent.walkUpFrames },
+            { suffix: "left",  frames: agent.walkLeftFrames },
+            { suffix: "right", frames: agent.walkRightFrames }
+          ];
+          dirs.forEach(d => {
+            const key = `${agent.id}-walk-${d.suffix}`;
+            if (!this.anims.exists(key)) {
+              this.anims.create({
+                key,
+                frames: this.anims.generateFrameNumbers(agent.spritesheetKey, { frames: d.frames }),
+                frameRate: 8,
+                repeat: -1
+              });
+            }
+          });
 
+          // Idle still sprite
+          const s = this.add
+            .sprite(agent.homeX, agent.homeY, agent.spritesheetKey, agent.idleFrame)
+            .setScale(SCALE)
+            .setOrigin(0.5, 0.8); // anchor near feet so breathing looks natural
+
+          // Breathing tween — gentle 1px bob over 2s
+          this.tweens.add({
+            targets: s,
+            y: agent.homeY - 1,
+            duration: 1000,
+            yoyo: true,
+            repeat: -1,
+            ease: "Sine.inOut"
+          });
+
+          // Floating name label
           this.add
-            .text(agent.homeX, agent.homeY - DRAW / 2 - 8, agent.displayName, {
+            .text(agent.homeX, agent.homeY - 16 * SCALE - 8, agent.displayName, {
               fontFamily: "ui-monospace, monospace",
               fontSize: "12px",
-              color: "#e6e6f0",
+              color: "#fffbe8",
               backgroundColor: "#0a0a0fcc",
               padding: { left: 4, right: 4, top: 1, bottom: 1 }
             })
             .setOrigin(0.5, 1)
-            .setAlpha(0.85);
+            .setAlpha(0.9);
         });
 
-        // Build version bottom-right
+        // ── Build version overlay
         this.add
-          .text(1276, 716, `build ${BUILD_VERSION}`, {
+          .text(W - 4, H - 4, `build ${BUILD_VERSION}`, {
             fontFamily: "ui-monospace, monospace",
             fontSize: "10px",
-            color: "#7a7a8a"
+            color: "#fffbe8"
           })
           .setOrigin(1, 1)
-          .setAlpha(0.5);
+          .setAlpha(0.45);
       }
     }
 
