@@ -1,0 +1,20 @@
+# docker-compose snippet — merge this `office-hub` service into your existing compose file.
+# It assumes Caddy lives on the same docker network so it can resolve `office-hub:3001`
+# (replace `web` with whatever network your Caddy container uses).
+
+services:
+  office-hub:
+    build: ./office-hub
+    container_name: office-hub
+    restart: unless-stopped
+    environment:
+      # Optional shared secret. If set, POST /event requires header `x-hub-token: <token>`.
+      HUB_TOKEN: ${OFFICE_HUB_TOKEN:-}
+    # No external ports — only Caddy reaches it via the docker network.
+    networks:
+      - web
+
+# Make sure the network exists (declared once at the top of the compose file):
+# networks:
+#   web:
+#     external: true

@@ -1,0 +1,33 @@
+# Caddy snippet — paste into the api.penthos.app site block of your Caddyfile.
+# SSE-safe: flush_interval -1 disables response buffering so /events streams in real time.
+#
+# Assumes office-hub is reachable on the docker network as `office-hub:3001`.
+# If you bind-mount or use a different network alias, adjust the upstream below.
+
+api.penthos.app {
+    # ... your existing routes ...
+
+    # POST events into the hub
+    handle /office/event {
+        rewrite * /event
+        reverse_proxy office-hub:3001
+    }
+
+    # Subscribe (SSE) to events out of the hub
+    handle /office/events {
+        rewrite * /events
+        reverse_proxy office-hub:3001 {
+            flush_interval -1
+            transport http {
+                response_header_timeout 0
+                read_timeout 0
+            }
+        }
+    }
+
+    # Optional: expose health behind the same prefix for monitoring
+    handle /office/health {
+        rewrite * /health
+        reverse_proxy office-hub:3001
+    }
+}

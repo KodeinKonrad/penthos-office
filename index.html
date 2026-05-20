@@ -32,7 +32,7 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-20T23:30:00Z";
+    const BUILD_VERSION = "2026-05-20T23:55:00Z";
     const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
 
     // Modern_Office_16x16.png (16 cols × 53 rows)
@@ -193,6 +193,8 @@
         placePrinter(pDeskX + TILE * 4, pDeskY + TILE / 2);
 
         // ── Agents
+        // Registry of agent handles → consumed by SSE event handler for move animations.
+        const agentMap = {};
         agents.forEach(agent => {
           // Walk animations
           const dirs = [
@@ -225,14 +227,13 @@
             .setOrigin(0.5, 1.0);
 
           // Breathing — gentle 1px Y bob over 2s
-          this.tweens.add({
-            targets: s,
-            y: agent.homeY - 1,
-            duration: 1000,
-            yoyo: true,
-            repeat: -1,
-            ease: "Sine.inOut"
-          });
+          this._addBreathing(s, { x: agent.homeX, y: agent.homeY });
+
+          // Stash a handle for the SSE event handler
+          agentMap[agent.id] = {
+            sprite: s,
+            home: { x: agent.homeX, y: agent.homeY, idleFrame: safeIdle }
+          };
 
           // Name chip floating above (32×3=96 px above feet for 16×32 chars, plus a little)
           this.add
@@ -295,6 +296,9 @@
             .setDepth(2000);
         }
 
+        // ── Phase 2: Server-Sent-Events hub connection
+        this._connectHub(agentMap, W);
+
         // ── Build version overlay
         this.add
           .text(W - 6, H - 6, `build ${BUILD_VERSION}${DEBUG ? " · debug" : ""}`, {
@@ -304,6 +308,115 @@
           })
           .setOrigin(1, 1)
           .setAlpha(0.55);
+      }
+
+      // ── Helpers used by the SSE event handler
+
+      _addBreathing(sprite, home) {
+        // Gentle 1px Y bob over 2s, looped forever. Killed by killTweensOf
+        // during walks; re-added on arrival.
+        return this.tweens.add({
+          targets: sprite,
+          y: home.y - 1,
+          duration: 1000,
+          yoyo: true,
+          repeat: -1,
+          ease: "Sine.inOut"
+        });
+      }
+
+      _connectHub(agentMap, W) {
+        const isLocal = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+        const hubBase = isLocal ? "http://localhost:3001" : "/office";
+        const url = hubBase + "/events";
+
+        const dot = this.add
+          .text(W - 6, 6, "○ connecting", {
+            fontFamily: "ui-monospace, monospace",
+            fontSize: "10px",
+            color: "#f0c870",
+            backgroundColor: "#0a0a0fcc",
+            padding: { left: 4, right: 4, top: 1, bottom: 1 }
+          })
+          .setOrigin(1, 0)
+          .setDepth(2000)
+          .setAlpha(0.8);
+
+        let live = false; // skip backlog replay; only act on events after 'ready'
+        let es;
+        try {
+          es = new EventSource(url);
+        } catch (e) {
+          dot.setText("● error").setColor("#e0606e");
+          console.error("SSE connect failed:", e);
+          return;
+        }
+
+        es.addEventListener("ready", () => {
+          live = true;
+          dot.setText("● live").setColor("#7fd97f");
+        });
+        es.addEventListener("office", (e) => {
+          if (!live) return;
+          try {
+            this._handleMoveEvent(agentMap, JSON.parse(e.data));
+          } catch (err) {
+            console.warn("bad office event:", err, e.data);
+          }
+        });
+        es.onerror = () => {
+          dot.setText("● offline").setColor("#e0606e");
+          // EventSource auto-reconnects; no teardown needed.
+        };
+      }
+
+      _handleMoveEvent(agentMap, event) {
+        if (!event || event.type !== "move" || !event.target) return;
+        const data = agentMap[event.target];
+        if (!data) return;
+        const { sprite, home } = data;
+
+        const dir = event.direction || "left";
+        const dur = Math.max(100, Math.min(30_000, event.duration || 3000));
+        const dist = Math.max(0, Math.min(1280, event.distance || 144));
+        const dx = dir === "left" ? -dist : dir === "right" ? dist : 0;
+        const dy = dir === "up"   ? -dist : dir === "down"  ? dist : 0;
+
+        // Cancel breathing or prior in-flight walk on this sprite.
+        this.tweens.killTweensOf(sprite);
+        sprite.y = home.y; // snap off the breathing bob before measuring
+
+        const walkKey = `${event.target}-walk-${dir}`;
+        if (this.anims.exists(walkKey)) sprite.play(walkKey);
+
+        const startX = sprite.x;
+        const startY = sprite.y;
+
+        const settle = () => {
+          sprite.stop();
+          sprite.setFrame(home.idleFrame);
+          sprite.setPosition(home.x, home.y);
+          this._addBreathing(sprite, home);
+        };
+
+        this.tweens.add({
+          targets: sprite,
+          x: startX + dx,
+          y: startY + dy,
+          duration: dur,
+          ease: "Linear",
+          onComplete: () => {
+            if (!event.returnToHome) { settle(); return; }
+            const back = { left: "right", right: "left", up: "down", down: "up" }[dir];
+            const backKey = `${event.target}-walk-${back}`;
+            if (this.anims.exists(backKey)) sprite.play(backKey);
+            this.tweens.add({
+              targets: sprite, x: home.x, y: home.y,
+              duration: dur, ease: "Linear",
+              onComplete: settle
+            });
+          }
+        });
       }
     }
 
