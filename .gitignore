@@ -4,3 +4,5 @@ Thumbs.db
 node_modules/
 .playwright-mcp/
 office_preview.png
+# Local scratch dir used for deploys — may contain secrets pulled from the VPS
+tmp/
