@@ -32,7 +32,7 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-20T22:15:00Z";
+    const BUILD_VERSION = "2026-05-20T23:30:00Z";
     const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
 
     // Modern_Office_16x16.png (16 cols × 53 rows)
@@ -54,9 +54,9 @@
     // Room_Builder_16x16.png (76 cols × 113 rows). Frame 1004 = wood parquet (seamless).
     const FLOOR_FRAME = 1004;
 
-    // Character sheet has 56 cols × 41 rows of 16×16 frames = 2296 total
+    // Character sheet has 56 cols × 20 char-rows of 16×32 frames = 1120 total
     const CHAR_SHEET_COLS = 56;
-    const CHAR_SHEET_ROWS = 41;
+    const CHAR_SHEET_ROWS = 20;
     const CHAR_FRAME_COUNT = CHAR_SHEET_COLS * CHAR_SHEET_ROWS;
 
     class OfficeScene extends Phaser.Scene {
@@ -74,10 +74,10 @@
       create() {
         const agents = this.cache.json.get("agents");
         agents.forEach(a => {
-          // 16×16 frames (NOT 32) — chars are compact chibi style, one full char per cell
+          // 16×32 frames — LimeZu chibi spans 2 grid cells vertically (hair row + body row)
           this.load.spritesheet(a.spritesheetKey, a.spritesheetPath, {
             frameWidth: 16,
-            frameHeight: 16
+            frameHeight: 32
           });
         });
         this.load.once("complete", () => this._buildScene(agents));
@@ -217,7 +217,7 @@
           // Guard against stale/partial agents.json where idleFrame is missing:
           // Phaser silently falls back to frame 0 if frame is undefined, which renders
           // a tiny back-of-head blob and looks like the char vanished.
-          const safeIdle = (typeof agent.idleFrame === "number") ? agent.idleFrame : 59;
+          const safeIdle = (typeof agent.idleFrame === "number") ? agent.idleFrame : 3;
           let currentFrame = safeIdle;
           const s = this.add
             .sprite(agent.homeX, agent.homeY, agent.spritesheetKey, currentFrame)
@@ -234,9 +234,9 @@
             ease: "Sine.inOut"
           });
 
-          // Name chip floating above (16×3=48 px above feet, plus a little)
+          // Name chip floating above (32×3=96 px above feet for 16×32 chars, plus a little)
           this.add
-            .text(agent.homeX, agent.homeY - 16 * SCALE - 6, agent.displayName, {
+            .text(agent.homeX, agent.homeY - 32 * SCALE - 6, agent.displayName, {
               fontFamily: "ui-monospace, monospace",
               fontSize: "12px",
               color: "#fffbe8",
@@ -248,14 +248,15 @@
 
           // ── Debug overlay — only when ?debug=1
           if (DEBUG) {
-            // Cyan bounding box around the 48×48 sprite footprint
-            const charDispH = 16 * SCALE; // 48
+            // Cyan bounding box around the 48×96 sprite footprint (16×32 at scale 3)
+            const charDispW = 16 * SCALE;  // 48
+            const charDispH = 32 * SCALE;  // 96
             const bbox = this.add.graphics();
             bbox.lineStyle(1, 0x00ffff, 1);
             bbox.strokeRect(
-              agent.homeX - charDispH / 2,
+              agent.homeX - charDispW / 2,
               agent.homeY - charDispH,
-              charDispH,
+              charDispW,
               charDispH
             );
 
