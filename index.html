@@ -32,32 +32,32 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-20T18:30:00Z";
+    const BUILD_VERSION = "2026-05-20T21:00:00Z";
+    const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
 
-    // ── Frame indices (verified visually via indexed renders)
-    // Modern_Office_16x16.png is 16 cols × 53 rows
+    // Modern_Office_16x16.png (16 cols × 53 rows)
     const OFFICE = {
-      // Beige desk strip — 3 tiles wide, 2 tiles tall (top row + middle row)
       DESK_TOP_L: 0,  DESK_TOP_M: 1,  DESK_TOP_R: 2,
       DESK_MID_L: 16, DESK_MID_M: 17, DESK_MID_R: 18,
-      // Single-tile items
-      CHAIR_BLACK:  568,   // dark office chair, back view
+      CHAIR_BLACK:  568,
       CHAIR_ORANGE: 569,
-      MONITOR_BLUE: 712,   // PC monitor with blue desktop on screen
-      PLANT_GREEN:  796,   // potted green plant
+      MONITOR_BLUE: 712,
+      PLANT_GREEN:  796,
       PLANT_SMALL:  780,
-      FILING_SHELF: 263,   // shelf / filing cabinet (single tile)
-      // Server rack — 1 tile wide × 2 tiles tall (top + bottom)
+      FILING_SHELF: 263,
       SERVER_TOP:    616,
       SERVER_BOTTOM: 632,
-      // Display / whiteboard — 2 tiles wide × 1 tile tall
       DISPLAY_L: 233, DISPLAY_R: 234,
-      // Printer — 2 tiles wide
       PRINTER_L: 680, PRINTER_R: 681
     };
 
-    // Room_Builder_16x16.png is 76 cols × 113 rows
-    const FLOOR_FRAME = 914;   // diamond-pattern carpet floor tile
+    // Room_Builder_16x16.png (76 cols × 113 rows). Frame 1004 = wood parquet (seamless).
+    const FLOOR_FRAME = 1004;
+
+    // Character sheet has 56 cols × 41 rows of 16×16 frames = 2296 total
+    const CHAR_SHEET_COLS = 56;
+    const CHAR_SHEET_ROWS = 41;
+    const CHAR_FRAME_COUNT = CHAR_SHEET_COLS * CHAR_SHEET_ROWS;
 
     class OfficeScene extends Phaser.Scene {
       constructor() {
@@ -65,22 +65,19 @@
       }
 
       preload() {
-        // Tilesets
-        this.load.spritesheet("walls",  "assets/sprites/interior_walls.png",    { frameWidth: 16, frameHeight: 16 });
-        this.load.spritesheet("office", "assets/sprites/office_furniture.png", { frameWidth: 16, frameHeight: 16 });
+        this.load.spritesheet("walls",     "assets/sprites/interior_walls.png",     { frameWidth: 16, frameHeight: 16 });
+        this.load.spritesheet("office",    "assets/sprites/office_furniture.png",  { frameWidth: 16, frameHeight: 16 });
         this.load.spritesheet("furniture", "assets/sprites/interior_furniture.png", { frameWidth: 16, frameHeight: 16 });
-
-        // Agents
         this.load.json("agents", "agents.json");
       }
 
       create() {
         const agents = this.cache.json.get("agents");
-        // Second load wave for character sheets (16×32)
         agents.forEach(a => {
+          // 16×16 frames (NOT 32) — chars are compact chibi style, one full char per cell
           this.load.spritesheet(a.spritesheetKey, a.spritesheetPath, {
             frameWidth: 16,
-            frameHeight: 32
+            frameHeight: 16
           });
         });
         this.load.once("complete", () => this._buildScene(agents));
@@ -92,7 +89,7 @@
         const SCALE = 3;
         const TILE = 16 * SCALE; // 48 px on screen per tile
 
-        // ── Floor: tile the entire canvas with the floor frame from Room_Builder
+        // ── Floor: tile the entire canvas with seamless wood parquet
         const colsX = Math.ceil(W / TILE);
         const colsY = Math.ceil(H / TILE);
         for (let ty = 0; ty < colsY; ty++) {
@@ -102,23 +99,18 @@
           }
         }
 
-        // ── Outer walls (dark border, 2 tiles thick on top, 1 tile on others)
-        // Build walls from solid rectangles since Room_Builder wall tiles are
-        // door-prebuilt and don't tile cleanly in arbitrary lengths.
+        // ── Outer walls (dark dark border, simple rectangles)
         const WALL = 0x2a2429;
         const WALL_HL = 0x4a3f47;
-        const WALL_TOP_H = TILE * 2;   // taller top wall for "wall depth"
-        const WALL_SIDE_W = TILE;
-
-        // top
-        this.add.rectangle(W / 2, WALL_TOP_H / 2, W, WALL_TOP_H, WALL);
-        this.add.rectangle(W / 2, WALL_TOP_H - 3, W, 2, WALL_HL).setAlpha(0.7);
+        // top wall — 1 tile thick
+        this.add.rectangle(W / 2, TILE / 2, W, TILE, WALL);
+        this.add.rectangle(W / 2, TILE - 3, W, 2, WALL_HL).setAlpha(0.6);
         // bottom
-        this.add.rectangle(W / 2, H - WALL_SIDE_W / 2, W, WALL_SIDE_W, WALL);
+        this.add.rectangle(W / 2, H - TILE / 2, W, TILE, WALL);
         // left
-        this.add.rectangle(WALL_SIDE_W / 2, H / 2, WALL_SIDE_W, H, WALL);
+        this.add.rectangle(TILE / 2, H / 2, TILE, H, WALL);
         // right
-        this.add.rectangle(W - WALL_SIDE_W / 2, H / 2, WALL_SIDE_W, H, WALL);
+        this.add.rectangle(W - TILE / 2, H / 2, TILE, H, WALL);
 
         // Area chip labels
         const chip = (x, y, txt) =>
@@ -129,88 +121,80 @@
             backgroundColor: "#fffbe8e8",
             padding: { left: 5, right: 5, top: 1, bottom: 1 }
           }).setOrigin(0, 0).setAlpha(0.95);
-        chip(WALL_SIDE_W + 8, WALL_TOP_H + 8,       "CEO OFFICE");
-        chip(W - 290,         WALL_TOP_H + 8,       "SERVER ROOM");
-        chip(WALL_SIDE_W + 8, H - 200,              "ARCHIVE");
-        chip(W / 2 - 50,      WALL_TOP_H + 8,       "RECEPTION");
+        chip(TILE + 8, TILE + 8,             "CEO OFFICE");
+        chip(W - 290,  TILE + 8,             "SERVER ROOM");
+        chip(TILE + 8, H - TILE - 28,        "ARCHIVE");
+        chip(W / 2 - 50, TILE + 8,           "RECEPTION");
 
-        // ── Furniture placement helpers
+        // ── Furniture helpers — always pass key explicitly
         const tile = (gx, gy, key, frame) =>
           this.add.image(gx, gy, key, frame).setScale(SCALE);
 
-        // Place a 3-wide × 2-tall desk (beige) anchored at top-left tile center.
         const placeDesk = (anchorX, anchorY) => {
-          // Top row
-          tile(anchorX,            anchorY,            "office", OFFICE.DESK_TOP_L);
-          tile(anchorX + TILE,     anchorY,            "office", OFFICE.DESK_TOP_M);
-          tile(anchorX + TILE * 2, anchorY,            "office", OFFICE.DESK_TOP_R);
-          // Bottom row
-          tile(anchorX,            anchorY + TILE,     "office", OFFICE.DESK_MID_L);
-          tile(anchorX + TILE,     anchorY + TILE,     "office", OFFICE.DESK_MID_M);
-          tile(anchorX + TILE * 2, anchorY + TILE,     "office", OFFICE.DESK_MID_R);
+          tile(anchorX,            anchorY,        "office", OFFICE.DESK_TOP_L);
+          tile(anchorX + TILE,     anchorY,        "office", OFFICE.DESK_TOP_M);
+          tile(anchorX + TILE * 2, anchorY,        "office", OFFICE.DESK_TOP_R);
+          tile(anchorX,            anchorY + TILE, "office", OFFICE.DESK_MID_L);
+          tile(anchorX + TILE,     anchorY + TILE, "office", OFFICE.DESK_MID_M);
+          tile(anchorX + TILE * 2, anchorY + TILE, "office", OFFICE.DESK_MID_R);
         };
-
-        // Place a server rack (1 wide × 2 tall)
         const placeServerRack = (x, y) => {
           tile(x, y,        "office", OFFICE.SERVER_TOP);
           tile(x, y + TILE, "office", OFFICE.SERVER_BOTTOM);
         };
-
-        // Place a printer (2 wide × 1 tall)
         const placePrinter = (x, y) => {
           tile(x,        y, "office", OFFICE.PRINTER_L);
           tile(x + TILE, y, "office", OFFICE.PRINTER_R);
         };
+        // Monitor sits ON TOP of a desk top row — y is desk-top y minus one tile
+        const placeMonitorOnDesk = (deskAnchorX, deskAnchorY, colOffset = 1) => {
+          const mx = deskAnchorX + colOffset * TILE;
+          const my = deskAnchorY - TILE;
+          tile(mx, my, "office", OFFICE.MONITOR_BLUE);
+        };
 
-        // ── CEO OFFICE (top-left): desk + chair + plant + display
-        const ceoDeskX = WALL_SIDE_W + TILE + TILE / 2;
-        const ceoDeskY = WALL_TOP_H + TILE * 2 + TILE / 2;
+        // ── CEO OFFICE (top-left)
+        const ceoDeskX = TILE + TILE + TILE / 2;          // 120
+        const ceoDeskY = TILE + TILE * 2 + TILE / 2;       // 168 (with 1-tile top wall now)
         placeDesk(ceoDeskX, ceoDeskY);
-        // monitor on desk (centered top of desk)
-        tile(ceoDeskX + TILE, ceoDeskY - TILE / 4, "office", OFFICE.MONITOR_BLUE);
-        // chair behind/under desk
-        tile(ceoDeskX + TILE, ceoDeskY + TILE * 2 + TILE / 4, "office", OFFICE.CHAIR_BLACK);
+        placeMonitorOnDesk(ceoDeskX, ceoDeskY, 1);
         // big plant in corner
-        tile(WALL_SIDE_W + TILE / 2 + TILE / 2, WALL_TOP_H + TILE + TILE / 2, "office", OFFICE.PLANT_GREEN);
+        tile(TILE + TILE / 2, TILE + TILE + TILE / 2, "office", OFFICE.PLANT_GREEN);
         // display board on top wall
-        tile(ceoDeskX + TILE * 4,        WALL_TOP_H + TILE / 2, "office", OFFICE.DISPLAY_L);
-        tile(ceoDeskX + TILE * 4 + TILE, WALL_TOP_H + TILE / 2, "office", OFFICE.DISPLAY_R);
+        tile(ceoDeskX + TILE * 4,        TILE + TILE / 2 + TILE / 4, "office", OFFICE.DISPLAY_L);
+        tile(ceoDeskX + TILE * 4 + TILE, TILE + TILE / 2 + TILE / 4, "office", OFFICE.DISPLAY_R);
 
         // ── SERVER ROOM (top-right): row of 3 server racks + D'Artagnan's desk
         const svrX0 = W - TILE * 8;
-        const svrY  = WALL_TOP_H + TILE * 2;
+        const svrY  = TILE + TILE * 2;
         for (let i = 0; i < 3; i++) {
           placeServerRack(svrX0 + i * TILE * 1.4, svrY);
         }
-        // D'Artagnan's desk in front
         const dDeskX = W - TILE * 5;
         const dDeskY = svrY + TILE * 3 + TILE / 2;
         placeDesk(dDeskX, dDeskY);
-        tile(dDeskX + TILE, dDeskY - TILE / 4, "office", OFFICE.MONITOR_BLUE);
-        tile(dDeskX + TILE, dDeskY + TILE * 2 + TILE / 4, "office", OFFICE.CHAIR_BLACK);
+        placeMonitorOnDesk(dDeskX, dDeskY, 1);
 
-        // ── RECEPTION (middle-top): plant cluster + small display
+        // ── RECEPTION (middle-top): plant cluster
         const recX = W / 2 - TILE;
-        const recY = WALL_TOP_H + TILE * 2;
-        tile(recX,                recY,            "office", OFFICE.PLANT_GREEN);
-        tile(recX + TILE,         recY,            "office", OFFICE.PLANT_SMALL);
-        tile(recX + TILE * 2,     recY,            "office", OFFICE.PLANT_GREEN);
+        const recY = TILE + TILE * 2;
+        tile(recX,            recY, "office", OFFICE.PLANT_GREEN);
+        tile(recX + TILE,     recY, "office", OFFICE.PLANT_SMALL);
+        tile(recX + TILE * 2, recY, "office", OFFICE.PLANT_GREEN);
 
         // ── ARCHIVE (bottom): row of 5 filing cabinets + Porthos's desk + printer
         const archY = H - TILE * 3;
         for (let i = 0; i < 5; i++) {
-          tile(WALL_SIDE_W + TILE * 2 + i * TILE, archY, "office", OFFICE.FILING_SHELF);
+          tile(TILE + TILE * 2 + i * TILE, archY, "office", OFFICE.FILING_SHELF);
         }
-        const pDeskX = WALL_SIDE_W + TILE * 12;
+        const pDeskX = TILE + TILE * 12;
         const pDeskY = archY - TILE / 2;
         placeDesk(pDeskX, pDeskY);
-        tile(pDeskX + TILE, pDeskY + TILE * 2 + TILE / 4, "office", OFFICE.CHAIR_ORANGE);
-        // printer next to Porthos
         placePrinter(pDeskX + TILE * 4, pDeskY + TILE / 2);
 
         // ── Agents
         agents.forEach(agent => {
-          // 4 walk animations
+          // Walk animations
           const dirs = [
             ["down",  agent.walkDownFrames],
             ["up",    agent.walkUpFrames],
@@ -229,12 +213,14 @@
             }
           });
 
+          // Sprite — chibi 16×16 scaled 3×, origin at feet
+          let currentFrame = agent.idleFrame;
           const s = this.add
-            .sprite(agent.homeX, agent.homeY, agent.spritesheetKey, agent.idleFrame)
+            .sprite(agent.homeX, agent.homeY, agent.spritesheetKey, currentFrame)
             .setScale(SCALE)
-            .setOrigin(0.5, 0.9); // anchor near feet
+            .setOrigin(0.5, 1.0);
 
-          // Breathing tween — gentle 1px Y bob over 2s
+          // Breathing — gentle 1px Y bob over 2s
           this.tweens.add({
             targets: s,
             y: agent.homeY - 1,
@@ -244,9 +230,9 @@
             ease: "Sine.inOut"
           });
 
-          // Name chip floating above
+          // Name chip floating above (16×3=48 px above feet, plus a little)
           this.add
-            .text(agent.homeX, agent.homeY - 32 * SCALE * 0.85, agent.displayName, {
+            .text(agent.homeX, agent.homeY - 16 * SCALE - 6, agent.displayName, {
               fontFamily: "ui-monospace, monospace",
               fontSize: "12px",
               color: "#fffbe8",
@@ -255,11 +241,58 @@
             })
             .setOrigin(0.5, 1)
             .setAlpha(0.92);
+
+          // ── Debug overlay — only when ?debug=1
+          if (DEBUG) {
+            // Cyan bounding box around the 48×48 sprite footprint
+            const charDispH = 16 * SCALE; // 48
+            const bbox = this.add.graphics();
+            bbox.lineStyle(1, 0x00ffff, 1);
+            bbox.strokeRect(
+              agent.homeX - charDispH / 2,
+              agent.homeY - charDispH,
+              charDispH,
+              charDispH
+            );
+
+            // Frame index label above the char
+            const frameLabel = this.add
+              .text(agent.homeX, agent.homeY - charDispH - 24, `f${currentFrame}`, {
+                fontFamily: "ui-monospace, monospace",
+                fontSize: "11px",
+                color: "#00ffff",
+                backgroundColor: "#000000cc",
+                padding: { left: 4, right: 4, top: 1, bottom: 1 }
+              })
+              .setOrigin(0.5, 1)
+              .setDepth(1000);
+
+            // Make sprite clickable; each click cycles +1 with wrap
+            s.setInteractive({ useHandCursor: true });
+            s.on("pointerdown", () => {
+              currentFrame = (currentFrame + 1) % CHAR_FRAME_COUNT;
+              s.setFrame(currentFrame);
+              frameLabel.setText(`f${currentFrame}`);
+            });
+          }
         });
+
+        // ── Debug banner top-left
+        if (DEBUG) {
+          this.add
+            .text(8, 8, "DEBUG MODE — click a char to cycle frames", {
+              fontFamily: "ui-monospace, monospace",
+              fontSize: "11px",
+              color: "#0a0a0f",
+              backgroundColor: "#00ffffe0",
+              padding: { left: 5, right: 5, top: 1, bottom: 1 }
+            })
+            .setDepth(2000);
+        }
 
         // ── Build version overlay
         this.add
-          .text(W - 6, H - 6, `build ${BUILD_VERSION}`, {
+          .text(W - 6, H - 6, `build ${BUILD_VERSION}${DEBUG ? " · debug" : ""}`, {
             fontFamily: "ui-monospace, monospace",
             fontSize: "10px",
             color: "#fffbe8"
