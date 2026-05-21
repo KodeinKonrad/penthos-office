@@ -32,7 +32,7 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-21T01:00:00Z";
+    const BUILD_VERSION = "2026-05-21T18:00:00Z";
 
     // ── Phase 3: SSE endpoint + action handlers
     // Frontend is READ-ONLY: subscribes to /events, never POSTs.
@@ -55,19 +55,20 @@
     const RECONNECT_BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000];
     const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
 
-    // Modern_Office_16x16.png (16 cols × 53 rows)
+    // Modern_Office_16x16.png (16 cols × 53 rows). Frame indices verified via debug-frames.html.
     const OFFICE = {
       DESK_TOP_L: 0,  DESK_TOP_M: 1,  DESK_TOP_R: 2,
       DESK_MID_L: 16, DESK_MID_M: 17, DESK_MID_R: 18,
-      CHAIR_BLACK:  568,
-      CHAIR_ORANGE: 569,
+      CHAIR_BLACK:  716,
+      CHAIR_ORANGE: 717,
       MONITOR_BLUE: 712,
       PLANT_GREEN:  796,
       PLANT_SMALL:  780,
       FILING_SHELF: 263,
       SERVER_TOP:    616,
       SERVER_BOTTOM: 632,
-      DISPLAY_L: 233, DISPLAY_R: 234,
+      DISPLAY_TOP_L: 233, DISPLAY_TOP_R: 234,
+      DISPLAY_BOT_L: 249, DISPLAY_BOT_R: 250,
       PRINTER_L: 680, PRINTER_R: 681
     };
 
@@ -147,8 +148,11 @@
         chip(W / 2 - 50, TILE + 8,           "RECEPTION");
 
         // ── Furniture helpers — always pass key explicitly
-        const tile = (gx, gy, key, frame) =>
-          this.add.image(gx, gy, key, frame).setScale(SCALE);
+        const tile = (gx, gy, key, frame, depth = 0) => {
+          const img = this.add.image(gx, gy, key, frame).setScale(SCALE);
+          if (depth) img.setDepth(depth);
+          return img;
+        };
 
         const placeDesk = (anchorX, anchorY) => {
           tile(anchorX,            anchorY,        "office", OFFICE.DESK_TOP_L);
@@ -166,50 +170,73 @@
           tile(x,        y, "office", OFFICE.PRINTER_L);
           tile(x + TILE, y, "office", OFFICE.PRINTER_R);
         };
-        // Monitor sits ON TOP of a desk top row — y is desk-top y minus one tile
-        const placeMonitorOnDesk = (deskAnchorX, deskAnchorY, colOffset = 1) => {
-          const mx = deskAnchorX + colOffset * TILE;
-          const my = deskAnchorY - TILE;
-          tile(mx, my, "office", OFFICE.MONITOR_BLUE);
+        // Monitor sits ON the back row of the desk (same y as DESK_TOP), rendered
+        // after the desk so it overlays the back-middle tile — looks like a
+        // monitor standing on the desk surface, not floating above.
+        const placeMonitorOnDesk = (deskAnchorX, deskAnchorY, colOffset = 1, frame = OFFICE.MONITOR_BLUE) => {
+          tile(deskAnchorX + colOffset * TILE, deskAnchorY, "office", frame, 10);
+        };
+        // Display board: two stacked tile rows (top+bottom halves) so the
+        // bezel renders complete instead of looking cropped.
+        const placeDisplayBoard = (anchorX, anchorY) => {
+          tile(anchorX,        anchorY,        "office", OFFICE.DISPLAY_TOP_L);
+          tile(anchorX + TILE, anchorY,        "office", OFFICE.DISPLAY_TOP_R);
+          tile(anchorX,        anchorY + TILE, "office", OFFICE.DISPLAY_BOT_L);
+          tile(anchorX + TILE, anchorY + TILE, "office", OFFICE.DISPLAY_BOT_R);
+        };
+        // Office chair beside the char's home — offset to the right by half a tile
+        // and slightly up, so the chair stays visible alongside the standing
+        // character instead of being hidden behind them.
+        const placeChairBeside = (homeX, homeY, frame = OFFICE.CHAIR_BLACK) => {
+          tile(homeX + TILE * 0.7, homeY - TILE / 3, "office", frame, 5);
         };
 
+        // Geometry: for a 24px gap between the desk's front edge and the
+        // character's head, deskY = homeY - 192 (96px char height + 24px gap
+        // + 72px desk total height from top-row center to bottom-row bottom).
+        const deskYFor = (homeY) => homeY - 192;
+        // Desks are placed 1 TILE left of the char so the 3-tile-wide desk
+        // is horizontally centered on the char's home column.
+        const deskXFor = (homeX) => homeX - TILE;
+
         // ── CEO OFFICE (top-left)
-        const ceoDeskX = TILE + TILE + TILE / 2;          // 120
-        const ceoDeskY = TILE + TILE * 2 + TILE / 2;       // 168 (with 1-tile top wall now)
+        const ceoDeskX = deskXFor(168);                   // 120
+        const ceoDeskY = deskYFor(390);                   // 198
         placeDesk(ceoDeskX, ceoDeskY);
         placeMonitorOnDesk(ceoDeskX, ceoDeskY, 1);
-        // big plant in corner
+        placeChairBeside(168, 390, OFFICE.CHAIR_ORANGE);
+        // single plant in the CEO corner
         tile(TILE + TILE / 2, TILE + TILE + TILE / 2, "office", OFFICE.PLANT_GREEN);
-        // display board on top wall
-        tile(ceoDeskX + TILE * 4,        TILE + TILE / 2 + TILE / 4, "office", OFFICE.DISPLAY_L);
-        tile(ceoDeskX + TILE * 4 + TILE, TILE + TILE / 2 + TILE / 4, "office", OFFICE.DISPLAY_R);
+        // complete display board (top + bottom halves) on the top wall
+        placeDisplayBoard(ceoDeskX + TILE * 4, TILE + TILE / 2 + TILE / 4);
 
-        // ── SERVER ROOM (top-right): row of 3 server racks + D'Artagnan's desk
-        const svrX0 = W - TILE * 8;
+        // ── SERVER ROOM (top-right): row of 3 server racks + D'Artagnan's desk + plant
+        const svrX0 = W - TILE * 9;
         const svrY  = TILE + TILE * 2;
         for (let i = 0; i < 3; i++) {
           placeServerRack(svrX0 + i * TILE * 1.4, svrY);
         }
-        const dDeskX = W - TILE * 5;
-        const dDeskY = svrY + TILE * 3 + TILE / 2;
+        const dDeskX = deskXFor(1088);                    // 1040
+        const dDeskY = deskYFor(530);                     // 338
         placeDesk(dDeskX, dDeskY);
         placeMonitorOnDesk(dDeskX, dDeskY, 1);
+        placeChairBeside(1088, 530, OFFICE.CHAIR_BLACK);
+        // server-room plant — slot to the left of D'Artagnan's desk
+        tile(dDeskX - TILE, dDeskY + TILE / 2, "office", OFFICE.PLANT_SMALL);
 
-        // ── RECEPTION (middle-top): plant cluster
-        const recX = W / 2 - TILE;
-        const recY = TILE + TILE * 2;
-        tile(recX,            recY, "office", OFFICE.PLANT_GREEN);
-        tile(recX + TILE,     recY, "office", OFFICE.PLANT_SMALL);
-        tile(recX + TILE * 2, recY, "office", OFFICE.PLANT_GREEN);
+        // ── RECEPTION (middle-top): a single tasteful plant — no more 3-plant cluster
+        tile(W / 2, TILE + TILE * 2, "office", OFFICE.PLANT_GREEN);
 
-        // ── ARCHIVE (bottom): row of 5 filing cabinets + Porthos's desk + printer
+        // ── ARCHIVE (bottom): row of 5 filing cabinets + Porthos's desk + monitor + chair + printer
         const archY = H - TILE * 3;
         for (let i = 0; i < 5; i++) {
           tile(TILE + TILE * 2 + i * TILE, archY, "office", OFFICE.FILING_SHELF);
         }
-        const pDeskX = TILE + TILE * 12;
-        const pDeskY = archY - TILE / 2;
+        const pDeskX = deskXFor(672);                     // 624
+        const pDeskY = deskYFor(670);                     // 478
         placeDesk(pDeskX, pDeskY);
+        placeMonitorOnDesk(pDeskX, pDeskY, 1);
+        placeChairBeside(672, 670, OFFICE.CHAIR_BLACK);
         placePrinter(pDeskX + TILE * 4, pDeskY + TILE / 2);
 
         // ── Agents
@@ -575,7 +602,8 @@
       _showBubble(sprite, home, text) {
         const padX = 6, padY = 3;
         // All shapes are drawn relative to (0,0) inside a Container so the bubble
-        // tracks the sprite during walk tweens (Phase 5 fix).
+        // tracks the sprite during walk tweens (Phase 5 fix, hardened in Phase 6
+        // via the scene update() override below).
         const txt = this.add
           .text(0, 0, text, {
             fontFamily: "ui-monospace, monospace",
@@ -607,8 +635,12 @@
           .setDepth(2100)
           .setAlpha(0);
 
-        const tracker = () => container.setPosition(sprite.x, sprite.y + Y_OFFSET);
-        this.events.on("update", tracker);
+        // Register with the scene's per-frame bubble tracker so the bubble
+        // follows the sprite during walk tweens. Scene.update() is the
+        // guaranteed once-per-frame hook in Phaser 4.
+        if (!this._liveBubbles) this._liveBubbles = [];
+        const entry = { container, sprite, offset: Y_OFFSET };
+        this._liveBubbles.push(entry);
 
         this.tweens.add({
           targets: container,
@@ -623,11 +655,25 @@
             duration: 220,
             ease: "Sine.in",
             onComplete: () => {
-              this.events.off("update", tracker);
+              const idx = this._liveBubbles.indexOf(entry);
+              if (idx >= 0) this._liveBubbles.splice(idx, 1);
               container.destroy();
             }
           });
         });
+      }
+
+      // Scene hook: Phaser calls update(time, delta) every frame. We use it
+      // to drag any live speech bubbles along with their sprites.
+      update() {
+        const list = this._liveBubbles;
+        if (!list || !list.length) return;
+        for (let i = 0; i < list.length; i++) {
+          const b = list[i];
+          if (b.container && b.container.active && b.sprite && b.sprite.active) {
+            b.container.setPosition(b.sprite.x, b.sprite.y + b.offset);
+          }
+        }
       }
 
       _addDebugTriggers(agentMap) {
