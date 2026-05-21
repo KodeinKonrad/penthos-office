@@ -1,90 +1,92 @@
-// office-hub — relay events into the Penthos office (Server-Sent-Events).
-// Endpoints:
-//   GET  /health  → JSON smoketest
-//   POST /event   → broadcast a JSON event to all SSE clients (optional x-hub-token auth)
-//   GET  /events  → Server-Sent-Events stream (replays last ~50 events on connect)
-// Zero dependencies. Node 18+ (uses node:http).
+const http = require("http");
+const crypto = require("crypto");
 
-const http = require("node:http");
-
-const PORT = Number(process.env.PORT || 3001);
-const TOKEN = process.env.HUB_TOKEN || "";
-const MAX_RECENT = 50;
-const HEARTBEAT_MS = 25_000;
+const PORT = 3001;
+const TOKEN = process.env.OFFICE_HUB_TOKEN || "change-me-token";
+const MAX_HISTORY = 50;
 
 const clients = new Set();
-const recent = [];
+const history = [];
 
-function broadcast(payload) {
-  const line = `event: office\ndata: ${JSON.stringify(payload)}\n\n`;
-  for (const c of clients) {
-    try { c.write(line); } catch (_) { clients.delete(c); }
+function broadcast(event) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const res of clients) {
+    try { res.write(payload); } catch (e) {}
   }
+  history.push(event);
+  if (history.length > MAX_HISTORY) history.shift();
 }
 
-function readJsonBody(req) {
+function readJson(req) {
   return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => {
-      data += c;
-      if (data.length > 65_536) { reject(new Error("payload too large")); req.destroy(); }
-    });
+    let body = "";
+    req.on("data", chunk => body += chunk);
     req.on("end", () => {
-      if (!data) return resolve({});
-      try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+      if (!body) return resolve({});
+      try { resolve(JSON.parse(body)); }
+      catch (e) { reject(e); }
     });
     req.on("error", reject);
   });
 }
 
-function json(res, code, body) {
-  res.writeHead(code, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(body));
-}
-
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "content-type, x-hub-token");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+  const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === "GET" && url.pathname === "/health") {
-    return json(res, 200, { ok: true, ts: Date.now(), clients: clients.size, recent: recent.length });
-  }
-
-  if (req.method === "POST" && url.pathname === "/event") {
-    if (TOKEN && req.headers["x-hub-token"] !== TOKEN) return json(res, 401, { error: "unauthorized" });
-    try {
-      const body = await readJsonBody(req);
-      const event = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, ts: Date.now(), ...body };
-      recent.push(event);
-      while (recent.length > MAX_RECENT) recent.shift();
-      broadcast(event);
-      return json(res, 200, { ok: true, id: event.id, broadcast: clients.size });
-    } catch (e) {
-      return json(res, 400, { error: e.message });
-    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true, clients: clients.size, history: history.length }));
   }
 
   if (req.method === "GET" && url.pathname === "/events") {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
+      "Cache-Control": "no-cache",
       "Connection": "keep-alive",
-      "X-Accel-Buffering": "no",
+      "X-Accel-Buffering": "no"
     });
-    for (const e of recent) res.write(`event: office\ndata: ${JSON.stringify(e)}\n\n`);
-    res.write(`event: ready\ndata: ${JSON.stringify({ ts: Date.now(), backlog: recent.length })}\n\n`);
+    res.write(":connected\n\n");
+    res.write(`data: ${JSON.stringify({ type: "hello", ts: Date.now() })}\n\n`);
     clients.add(res);
-    const hb = setInterval(() => { try { res.write(`: keepalive\n\n`); } catch (_) {} }, HEARTBEAT_MS);
-    req.on("close", () => { clearInterval(hb); clients.delete(res); });
+    const keepalive = setInterval(() => {
+      try { res.write(":ping\n\n"); } catch (e) {}
+    }, 25000);
+    req.on("close", () => {
+      clearInterval(keepalive);
+      clients.delete(res);
+    });
     return;
   }
 
-  return json(res, 404, { error: "not found", path: url.pathname });
+  if (req.method === "POST" && url.pathname === "/event") {
+    const auth = req.headers["authorization"] || "";
+    const provided = auth.replace(/^Bearer\s+/i, "");
+    if (provided !== TOKEN) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+    }
+    try {
+      const body = await readJson(req);
+      const event = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        agent: body.agent || "unknown",
+        action: body.action || "idle",
+        meta: body.meta || {}
+      };
+      broadcast(event);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: true, event }));
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "bad-json" }));
+    }
+  }
+
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ ok: false, error: "not-found" }));
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`office-hub listening on :${PORT}  token=${TOKEN ? "set" : "NONE"}`);
+server.listen(PORT, () => {
+  console.log(`office-hub listening on :${PORT}`);
 });
