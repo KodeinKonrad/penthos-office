@@ -32,7 +32,27 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-20T23:55:00Z";
+    const BUILD_VERSION = "2026-05-21T01:00:00Z";
+
+    // ── Phase 3: SSE endpoint + action handlers
+    // Frontend is READ-ONLY: subscribes to /events, never POSTs.
+    // Bearer token stays server-side (n8n/GitHub/Claude Code hooks).
+    const HUB_URL_PROD = "https://office-api.penthos.app/events";
+    const HUB_URL_DEV  = "http://localhost:3001/events";
+    // Per-agent vectors for action handlers (80–120px nudge, then home).
+    const ACTION_VECTORS = {
+      "code.write": {
+        paul:      { dx:   0, dy: -100, dir: "up"    },
+        dartagnan: { dx:   0, dy: -110, dir: "up"    },
+        porthos:   { dx: -100, dy:   0, dir: "left"  }
+      },
+      "code.bash": {
+        paul:      { dx:  110, dy:   0, dir: "right" },
+        dartagnan: { dx: -110, dy:   0, dir: "left"  },
+        porthos:   { dx:   0, dy: -100, dir: "up"    }
+      }
+    };
+    const RECONNECT_BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000];
     const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
 
     // Modern_Office_16x16.png (16 cols × 53 rows)
@@ -231,6 +251,7 @@
 
           // Stash a handle for the SSE event handler
           agentMap[agent.id] = {
+            id: agent.id,
             sprite: s,
             home: { x: agent.homeX, y: agent.homeY, idleFrame: safeIdle }
           };
@@ -283,7 +304,7 @@
           }
         });
 
-        // ── Debug banner top-left
+        // ── Debug banner + Phase 3 trigger buttons (top-left)
         if (DEBUG) {
           this.add
             .text(8, 8, "DEBUG MODE — click a char to cycle frames", {
@@ -294,9 +315,10 @@
               padding: { left: 5, right: 5, top: 1, bottom: 1 }
             })
             .setDepth(2000);
+          this._addDebugTriggers(agentMap);
         }
 
-        // ── Phase 2: Server-Sent-Events hub connection
+        // ── Phase 3: SSE connection (auto-reconnect with backoff)
         this._connectHub(agentMap, W);
 
         // ── Build version overlay
@@ -327,11 +349,12 @@
 
       _connectHub(agentMap, W) {
         const isLocal = location.hostname === "localhost" || location.hostname === "127.0.0.1";
-        const hubBase = isLocal ? "http://localhost:3001" : "/office";
-        const url = hubBase + "/events";
+        const url = isLocal ? HUB_URL_DEV : HUB_URL_PROD;
 
+        // Status dot (top-right). Three states: yellow connecting/reconnecting,
+        // green open, red disconnected.
         const dot = this.add
-          .text(W - 6, 6, "○ connecting", {
+          .text(W - 6, 6, "● connecting", {
             fontFamily: "ui-monospace, monospace",
             fontSize: "10px",
             color: "#f0c870",
@@ -340,57 +363,154 @@
           })
           .setOrigin(1, 0)
           .setDepth(2000)
-          .setAlpha(0.8);
+          .setAlpha(0.85);
+        // Native browser tooltip via the underlying DOM node (Phaser Text exposes it).
+        const setTip = (txt) => {
+          if (dot.node) dot.node.title = txt;
+          else if (dot.canvas) dot.canvas.title = txt;
+        };
+        setTip("Connecting to " + url);
 
-        let live = false; // skip backlog replay; only act on events after 'ready'
+        this._sseState = {
+          dot, setTip, url, agentMap,
+          es: null,
+          backoffIndex: 0,
+          reconnectTimer: null,
+          tickTimer: null,
+          retryAt: 0,
+          closed: false
+        };
+        this._openSse();
+      }
+
+      _openSse() {
+        const s = this._sseState;
+        s.dot.setText("● connecting").setColor("#f0c870");
+        s.setTip("Connecting to " + s.url);
+
         let es;
         try {
-          es = new EventSource(url);
+          es = new EventSource(s.url);
         } catch (e) {
-          dot.setText("● error").setColor("#e0606e");
-          console.error("SSE connect failed:", e);
+          console.error("[office] SSE constructor threw:", e);
+          this._scheduleReconnect();
           return;
         }
+        s.es = es;
 
-        es.addEventListener("ready", () => {
-          live = true;
-          dot.setText("● live").setColor("#7fd97f");
+        es.onopen = () => {
+          s.backoffIndex = 0; // reset backoff on successful open
+          s.dot.setText("● live").setColor("#7fd97f");
+          s.setTip("Connected · " + s.url);
+          console.log("[office] SSE open:", s.url);
+        };
+
+        // Hub sends a named "hello" event right after connect. Ignore the payload —
+        // it's just a greeting; readyState=OPEN already tells us we're live.
+        es.addEventListener("hello", (e) => {
+          console.log("[office] hello:", e.data);
         });
+
+        // Default `message` event — the server's office events arrive here
+        // (no custom `event:` line ⇒ default type).
+        es.onmessage = (e) => {
+          let data;
+          try { data = JSON.parse(e.data); }
+          catch (err) { console.warn("[office] bad JSON:", err, e.data); return; }
+          console.log("[office] event:", data);
+          this._handleEvent(data);
+        };
+        // Also listen on a named "office" event in case the hub upgrades to typed events.
         es.addEventListener("office", (e) => {
-          if (!live) return;
-          try {
-            this._handleMoveEvent(agentMap, JSON.parse(e.data));
-          } catch (err) {
-            console.warn("bad office event:", err, e.data);
-          }
+          let data;
+          try { data = JSON.parse(e.data); }
+          catch (err) { console.warn("[office] bad JSON:", err, e.data); return; }
+          console.log("[office] event:", data);
+          this._handleEvent(data);
         });
-        es.onerror = () => {
-          dot.setText("● offline").setColor("#e0606e");
-          // EventSource auto-reconnects; no teardown needed.
+
+        es.onerror = (e) => {
+          console.warn("[office] SSE error; readyState=", es.readyState);
+          if (es.readyState === EventSource.CLOSED) {
+            this._scheduleReconnect();
+          }
+          // CONNECTING (0) means the browser is itself retrying. Surface as yellow.
+          else if (es.readyState === EventSource.CONNECTING) {
+            s.dot.setText("● reconnecting").setColor("#f0c870");
+            s.setTip("Reconnecting…");
+          }
         };
       }
 
-      _handleMoveEvent(agentMap, event) {
-        if (!event || event.type !== "move" || !event.target) return;
-        const data = agentMap[event.target];
-        if (!data) return;
+      _scheduleReconnect() {
+        const s = this._sseState;
+        if (!s || s.closed) return;
+        if (s.es) { try { s.es.close(); } catch {} s.es = null; }
+        const delay = RECONNECT_BACKOFF[Math.min(s.backoffIndex, RECONNECT_BACKOFF.length - 1)];
+        s.backoffIndex++;
+        s.retryAt = Date.now() + delay;
+
+        // Disconnected (red) until the next attempt fires.
+        s.dot.setText("● disconnected").setColor("#e0606e");
+        s.setTip(`Disconnected — retry in ${Math.ceil(delay / 1000)}s`);
+
+        // Tick the tooltip every second so the user sees the countdown on hover.
+        if (s.tickTimer) clearInterval(s.tickTimer);
+        s.tickTimer = setInterval(() => {
+          if (!this._sseState || this._sseState !== s) { clearInterval(s.tickTimer); return; }
+          const left = Math.max(0, Math.ceil((s.retryAt - Date.now()) / 1000));
+          if (left > 0) {
+            s.dot.setText("● reconnecting").setColor("#f0c870");
+            s.setTip(`Reconnecting in ${left}s`);
+          }
+        }, 1000);
+
+        if (s.reconnectTimer) clearTimeout(s.reconnectTimer);
+        s.reconnectTimer = setTimeout(() => {
+          if (s.tickTimer) { clearInterval(s.tickTimer); s.tickTimer = null; }
+          this._openSse();
+        }, delay);
+      }
+
+      _handleEvent(event) {
+        if (!event || typeof event !== "object") return;
+        // Defensive: also accept legacy {target, action} or {agent, type}
+        const agentId = event.agent || event.target;
+        const action  = event.action || event.type;
+        if (!agentId || !action) return;
+        if (action === "idle") return;
+        if (action === "hello") return; // already handled by named listener
+        const data = this._sseState && this._sseState.agentMap
+          ? this._sseState.agentMap[agentId]
+          : null;
+        if (!data) return console.warn("[office] unknown agent:", agentId);
+
+        const label = (event.meta && event.meta.file) ? event.meta.file : action;
+        this._showBubble(data.sprite, data.home, label);
+
+        if (action === "code.write" || action === "code.bash") {
+          this._actionNudge(data, action);
+        } else if (action === "git.push") {
+          this._actionGitPush(data);
+        } else {
+          console.log("[office] unknown action, bubble only:", action);
+        }
+      }
+
+      _actionNudge(data, action) {
         const { sprite, home } = data;
+        const vec = ACTION_VECTORS[action] && ACTION_VECTORS[action][sprite.texture.key.replace("char_", "")];
+        // sprite.texture.key is "char_paul" → strip prefix
+        const vector = vec || { dx: -90, dy: 0, dir: "left" };
+        const dur = 1100; // ms one-way → ~2.2s total round-trip
 
-        const dir = event.direction || "left";
-        const dur = Math.max(100, Math.min(30_000, event.duration || 3000));
-        const dist = Math.max(0, Math.min(1280, event.distance || 144));
-        const dx = dir === "left" ? -dist : dir === "right" ? dist : 0;
-        const dy = dir === "up"   ? -dist : dir === "down"  ? dist : 0;
-
-        // Cancel breathing or prior in-flight walk on this sprite.
         this.tweens.killTweensOf(sprite);
-        sprite.y = home.y; // snap off the breathing bob before measuring
+        sprite.y = home.y;
+        const startX = home.x;
+        const startY = home.y;
 
-        const walkKey = `${event.target}-walk-${dir}`;
+        const walkKey = `${data.id || sprite.texture.key.replace("char_", "")}-walk-${vector.dir}`;
         if (this.anims.exists(walkKey)) sprite.play(walkKey);
-
-        const startX = sprite.x;
-        const startY = sprite.y;
 
         const settle = () => {
           sprite.stop();
@@ -401,22 +521,142 @@
 
         this.tweens.add({
           targets: sprite,
-          x: startX + dx,
-          y: startY + dy,
+          x: startX + vector.dx,
+          y: startY + vector.dy,
           duration: dur,
-          ease: "Linear",
+          ease: "Sine.inOut",
           onComplete: () => {
-            if (!event.returnToHome) { settle(); return; }
-            const back = { left: "right", right: "left", up: "down", down: "up" }[dir];
-            const backKey = `${event.target}-walk-${back}`;
+            const back = { left: "right", right: "left", up: "down", down: "up" }[vector.dir];
+            const backKey = `${data.id || sprite.texture.key.replace("char_", "")}-walk-${back}`;
             if (this.anims.exists(backKey)) sprite.play(backKey);
             this.tweens.add({
               targets: sprite, x: home.x, y: home.y,
-              duration: dur, ease: "Linear",
+              duration: dur, ease: "Sine.inOut",
               onComplete: settle
             });
           }
         });
+      }
+
+      _actionGitPush(data) {
+        const { sprite, home } = data;
+        const targetY = home.y + 200; // off-canvas downwards
+
+        this.tweens.killTweensOf(sprite);
+        sprite.y = home.y;
+
+        const walkKey = `${sprite.texture.key.replace("char_", "")}-walk-down`;
+        if (this.anims.exists(walkKey)) sprite.play(walkKey);
+
+        this.tweens.add({
+          targets: sprite,
+          y: targetY,
+          duration: 900,
+          ease: "Sine.in",
+          onComplete: () => {
+            sprite.setVisible(false);
+            this.time.delayedCall(3000, () => {
+              sprite.setPosition(home.x, home.y);
+              sprite.setFrame(home.idleFrame);
+              sprite.setAlpha(0);
+              sprite.setVisible(true);
+              this.tweens.add({
+                targets: sprite,
+                alpha: 1,
+                duration: 400,
+                ease: "Sine.out",
+                onComplete: () => this._addBreathing(sprite, home)
+              });
+            });
+          }
+        });
+      }
+
+      _showBubble(sprite, home, text) {
+        const x = home.x;
+        // Bubble sits above the chibi's head — sprite is 16×32 at scale 3 = 96px tall,
+        // origin (0.5, 1.0) → head ~96px above home.y. Add 16px extra clearance.
+        const yAnchor = home.y - 96 - 12;
+
+        const padX = 6, padY = 3;
+        const txt = this.add
+          .text(x, yAnchor, text, {
+            fontFamily: "ui-monospace, monospace",
+            fontSize: "11px",
+            color: "#0a0a0f"
+          })
+          .setOrigin(0.5, 1)
+          .setDepth(2105)
+          .setAlpha(0);
+
+        const w = Math.ceil(txt.width) + padX * 2;
+        const h = Math.ceil(txt.height) + padY * 2;
+        const bx = x - w / 2;
+        const by = yAnchor - h;
+
+        const g = this.add.graphics().setDepth(2100).setAlpha(0);
+        g.fillStyle(0xfffbe8, 1);
+        g.fillRoundedRect(bx, by, w, h, 4);
+        g.lineStyle(1, 0x2a2429, 1);
+        g.strokeRoundedRect(bx, by, w, h, 4);
+        // Little tail pointing down at the agent
+        g.fillStyle(0xfffbe8, 1);
+        g.fillTriangle(x - 4, yAnchor, x + 4, yAnchor, x, yAnchor + 5);
+        g.lineStyle(1, 0x2a2429, 1);
+        g.lineBetween(x - 4, yAnchor, x, yAnchor + 5);
+        g.lineBetween(x + 4, yAnchor, x, yAnchor + 5);
+
+        this.tweens.add({
+          targets: [g, txt],
+          alpha: 1,
+          duration: 180,
+          ease: "Sine.out"
+        });
+        this.time.delayedCall(3600, () => {
+          this.tweens.add({
+            targets: [g, txt],
+            alpha: 0,
+            duration: 220,
+            ease: "Sine.in",
+            onComplete: () => { g.destroy(); txt.destroy(); }
+          });
+        });
+      }
+
+      _addDebugTriggers(agentMap) {
+        // Persist agentMap for synthetic events
+        if (!this._sseState) this._sseState = { agentMap };
+        else this._sseState.agentMap = agentMap;
+
+        const fire = (agent, action, meta = {}) => () => {
+          const ev = { id: "debug-" + Date.now(), ts: Date.now(), agent, action, meta };
+          console.log("[office] (debug trigger):", ev);
+          this._handleEvent(ev);
+        };
+
+        const triggers = [
+          { label: "▶ code.write @ dartagnan", fn: fire("dartagnan", "code.write", { file: "server.js" }) },
+          { label: "▶ code.bash  @ paul",       fn: fire("paul",       "code.bash",  { cmd: "npm test" }) },
+          { label: "▶ git.push   @ porthos",    fn: fire("porthos",    "git.push",   { branch: "main" }) }
+        ];
+
+        let y = 32;
+        for (const t of triggers) {
+          const btn = this.add
+            .text(8, y, t.label, {
+              fontFamily: "ui-monospace, monospace",
+              fontSize: "11px",
+              color: "#0a0a0f",
+              backgroundColor: "#fcd34dee",
+              padding: { left: 6, right: 6, top: 2, bottom: 2 }
+            })
+            .setDepth(2000)
+            .setInteractive({ useHandCursor: true });
+          btn.on("pointerover", () => btn.setBackgroundColor("#fbbf24"));
+          btn.on("pointerout",  () => btn.setBackgroundColor("#fcd34dee"));
+          btn.on("pointerdown", t.fn);
+          y += btn.height + 4;
+        }
       }
     }
 
