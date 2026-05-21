@@ -573,52 +573,59 @@
       }
 
       _showBubble(sprite, home, text) {
-        const x = home.x;
-        // Bubble sits above the chibi's head — sprite is 16×32 at scale 3 = 96px tall,
-        // origin (0.5, 1.0) → head ~96px above home.y. Add 16px extra clearance.
-        const yAnchor = home.y - 96 - 12;
-
         const padX = 6, padY = 3;
+        // All shapes are drawn relative to (0,0) inside a Container so the bubble
+        // tracks the sprite during walk tweens (Phase 5 fix).
         const txt = this.add
-          .text(x, yAnchor, text, {
+          .text(0, 0, text, {
             fontFamily: "ui-monospace, monospace",
             fontSize: "11px",
             color: "#0a0a0f"
           })
-          .setOrigin(0.5, 1)
-          .setDepth(2105)
-          .setAlpha(0);
+          .setOrigin(0.5, 1);
 
         const w = Math.ceil(txt.width) + padX * 2;
         const h = Math.ceil(txt.height) + padY * 2;
-        const bx = x - w / 2;
-        const by = yAnchor - h;
 
-        const g = this.add.graphics().setDepth(2100).setAlpha(0);
+        const g = this.add.graphics();
         g.fillStyle(0xfffbe8, 1);
-        g.fillRoundedRect(bx, by, w, h, 4);
+        g.fillRoundedRect(-w / 2, -h, w, h, 4);
         g.lineStyle(1, 0x2a2429, 1);
-        g.strokeRoundedRect(bx, by, w, h, 4);
-        // Little tail pointing down at the agent
+        g.strokeRoundedRect(-w / 2, -h, w, h, 4);
+        // Tail pointing down at the agent
         g.fillStyle(0xfffbe8, 1);
-        g.fillTriangle(x - 4, yAnchor, x + 4, yAnchor, x, yAnchor + 5);
+        g.fillTriangle(-4, 0, 4, 0, 0, 5);
         g.lineStyle(1, 0x2a2429, 1);
-        g.lineBetween(x - 4, yAnchor, x, yAnchor + 5);
-        g.lineBetween(x + 4, yAnchor, x, yAnchor + 5);
+        g.lineBetween(-4, 0, 0, 5);
+        g.lineBetween(4, 0, 0, 5);
+
+        // Sprite has origin (0.5, 1.0) → sprite.y is feet, top is sprite.y - 96.
+        // Container origin sits 12px above the head; tail tip extends 5px down from there.
+        const Y_OFFSET = -96 - 12;
+        const container = this.add
+          .container(sprite.x, sprite.y + Y_OFFSET, [g, txt])
+          .setDepth(2100)
+          .setAlpha(0);
+
+        const tracker = () => container.setPosition(sprite.x, sprite.y + Y_OFFSET);
+        this.events.on("update", tracker);
 
         this.tweens.add({
-          targets: [g, txt],
+          targets: container,
           alpha: 1,
           duration: 180,
           ease: "Sine.out"
         });
         this.time.delayedCall(3600, () => {
           this.tweens.add({
-            targets: [g, txt],
+            targets: container,
             alpha: 0,
             duration: 220,
             ease: "Sine.in",
-            onComplete: () => { g.destroy(); txt.destroy(); }
+            onComplete: () => {
+              this.events.off("update", tracker);
+              container.destroy();
+            }
           });
         });
       }
