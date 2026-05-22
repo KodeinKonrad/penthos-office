@@ -4,5 +4,9 @@ Thumbs.db
 node_modules/
 .playwright-mcp/
 office_preview.png
+# Verifikations-Screenshots immer in _review/review.png (überschreibend) — nie commiten
+_review/
+phase*.png
+*-review.png
 # Local scratch dir used for deploys — may contain secrets pulled from the VPS
 tmp/
