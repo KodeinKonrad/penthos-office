@@ -32,30 +32,18 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-21T18:00:00Z";
+    const BUILD_VERSION = "2026-05-22T15:30:00Z";
 
     // ── Phase 3: SSE endpoint + action handlers
     // Frontend is READ-ONLY: subscribes to /events, never POSTs.
     // Bearer token stays server-side (n8n/GitHub/Claude Code hooks).
     const HUB_URL_PROD = "https://office-api.penthos.app/events";
     const HUB_URL_DEV  = "http://localhost:3001/events";
-    // Per-agent vectors for action handlers (80–120px nudge, then home).
-    const ACTION_VECTORS = {
-      "code.write": {
-        paul:      { dx:   0, dy: -100, dir: "up"    },
-        dartagnan: { dx:   0, dy: -110, dir: "up"    },
-        porthos:   { dx: -100, dy:   0, dir: "left"  }
-      },
-      "code.bash": {
-        paul:      { dx:  110, dy:   0, dir: "right" },
-        dartagnan: { dx: -110, dy:   0, dir: "left"  },
-        porthos:   { dx:   0, dy: -100, dir: "up"    }
-      }
-    };
+
     const RECONNECT_BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000];
     const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
 
-    // Modern_Office_16x16.png (16 cols × 53 rows). Frame indices verified via debug-frames.html.
+    // Modern_Office_16x16.png (16 cols × 53 rows).
     const OFFICE = {
       DESK_TOP_L: 0,  DESK_TOP_M: 1,  DESK_TOP_R: 2,
       DESK_MID_L: 16, DESK_MID_M: 17, DESK_MID_R: 18,
@@ -72,8 +60,77 @@
       PRINTER_L: 680, PRINTER_R: 681
     };
 
-    // Room_Builder_16x16.png (76 cols × 113 rows). Frame 1004 = wood parquet (seamless).
-    const FLOOR_FRAME = 1004;
+    // Room_Builder_Floors_16x16.png (15 cols × 40 rows). Frame 61 = clean white seamless fill.
+    const FLOOR_WHITE = 61;
+
+    // Phase 7B room geometry. Canvas 1280×720 at TILE=48 → 26.67 × 15 tiles.
+    // Outer wall 1 tile. Horizontal dividers at row 5 (top band ↔ meeting) and row 9
+    // (meeting ↔ bottom band). Vertical divider at col 13 in top & bottom bands only.
+    const WALL_FILL    = 0xb8c0c8;
+    const WALL_ACCENT  = 0x6a747e;
+    // Doorway gap = 2 tiles centered on cols 5-6 (server/testing) and 19-20 (frontend/lounge).
+
+    // Wienerische Sprechblasen-Pools (Phase 7B). {file} wird durch meta.file ersetzt.
+    const BUBBLE_LINES = {
+      "code.write.frontend": [
+        "I pass des Layout grad an",
+        "Schau ma, obs jetzt schöner is",
+        "{file} kriegt an neuen Anstrich",
+        "Mom, des sieht no nix aus",
+        "Frontend-Feinschliff"
+      ],
+      "code.write.backend": [
+        "I muass kurz was an da Datenstruktur drahn",
+        "{file} braucht a Anpassung",
+        "Backend kurz biagln",
+        "Migration durchziehn",
+        "Data-Layer rasch fixen"
+      ],
+      "code.bash": [
+        "I schau ma schnö am Server um",
+        "Lass mi grad {file}",
+        "Kurz was am Terminal checken",
+        "Server-Run pflegen",
+        "Bash-Kurzeinlage"
+      ],
+      "git.push": [
+        "So, des kummt jetzt aufi",
+        "Ab damit auf main",
+        "Push is draussen",
+        "Hopp, nach GitHub",
+        "Commit unterwegs"
+      ],
+      "porthos.patrol": [
+        "I schau ob eh ois passt",
+        "Alles im grünen Bereich?",
+        "Kontrollgang",
+        "Schau ma mal",
+        "Alles ruhig hier"
+      ]
+    };
+
+    // Maps file path/extension → "frontend" or "backend" bucket
+    function bubbleBucket(action, file) {
+      if (action === "git.push") return "git.push";
+      if (action === "code.bash") return "code.bash";
+      if (action === "code.write") {
+        if (!file) return "code.write.frontend";
+        const f = String(file).toLowerCase();
+        if (f.endsWith(".sql") || f.includes("migration") || f.includes("dartagnan") ||
+            f.endsWith(".mjs") || f.endsWith(".js") && f.includes("server")) {
+          return "code.write.backend";
+        }
+        return "code.write.frontend";
+      }
+      return null;
+    }
+    function pickPhrase(action, file) {
+      const bucket = bubbleBucket(action, file);
+      if (!bucket || !BUBBLE_LINES[bucket]) return file || action;
+      const pool = BUBBLE_LINES[bucket];
+      const line = pool[Math.floor(Math.random() * pool.length)];
+      return line.replace("{file}", file || "des");
+    }
 
     // Character sheet has 56 cols × 20 char-rows of 16×32 frames = 1120 total
     const CHAR_SHEET_COLS = 56;
@@ -89,6 +146,7 @@
         this.load.spritesheet("walls",     "assets/sprites/interior_walls.png",     { frameWidth: 16, frameHeight: 16 });
         this.load.spritesheet("office",    "assets/sprites/office_furniture.png",  { frameWidth: 16, frameHeight: 16 });
         this.load.spritesheet("furniture", "assets/sprites/interior_furniture.png", { frameWidth: 16, frameHeight: 16 });
+        this.load.spritesheet("floors",    "assets/sprites/floors.png",            { frameWidth: 16, frameHeight: 16 });
         this.load.json("agents", "agents.json?v=" + encodeURIComponent(BUILD_VERSION));
       }
 
@@ -110,30 +168,54 @@
         const SCALE = 3;
         const TILE = 16 * SCALE; // 48 px on screen per tile
 
-        // ── Floor: tile the entire canvas with seamless wood parquet
+        // ── Floor: tile entire canvas with seamless white (Room_Builder_Floors frame 500)
         const colsX = Math.ceil(W / TILE);
         const colsY = Math.ceil(H / TILE);
         for (let ty = 0; ty < colsY; ty++) {
           for (let tx = 0; tx < colsX; tx++) {
-            this.add.image(tx * TILE + TILE / 2, ty * TILE + TILE / 2, "walls", FLOOR_FRAME)
+            this.add.image(tx * TILE + TILE / 2, ty * TILE + TILE / 2, "floors", FLOOR_WHITE)
               .setScale(SCALE);
           }
         }
 
-        // ── Outer walls (dark dark border, simple rectangles)
-        const WALL = 0x2a2429;
-        const WALL_HL = 0x4a3f47;
-        // top wall — 1 tile thick
-        this.add.rectangle(W / 2, TILE / 2, W, TILE, WALL);
-        this.add.rectangle(W / 2, TILE - 3, W, 2, WALL_HL).setAlpha(0.6);
-        // bottom
-        this.add.rectangle(W / 2, H - TILE / 2, W, TILE, WALL);
-        // left
-        this.add.rectangle(TILE / 2, H / 2, TILE, H, WALL);
-        // right
-        this.add.rectangle(W - TILE / 2, H / 2, TILE, H, WALL);
+        // ── Outer walls (light gray rectangles, 1 tile thick)
+        this.add.rectangle(W / 2, TILE / 2,     W, TILE, WALL_FILL);
+        this.add.rectangle(W / 2, H - TILE / 2, W, TILE, WALL_FILL);
+        this.add.rectangle(TILE / 2,     H / 2, TILE, H, WALL_FILL);
+        this.add.rectangle(W - TILE / 2, H / 2, TILE, H, WALL_FILL);
 
-        // Area chip labels
+        // ── Inner horizontal dividers. Phase 7B.9: row 9 wall only covers cols 1–12
+        // (testing↔big-room) so lounge merges with meeting into one L-shaped big room.
+        const horizWallSegments = (yCenter, segs) => {
+          for (const s of segs) {
+            const cx = (s.x0 + s.x1) / 2;
+            const w  = s.x1 - s.x0;
+            this.add.rectangle(cx, yCenter, w, TILE, WALL_FILL);
+            this.add.rectangle(cx, yCenter - TILE / 2 + 1, w, 2, WALL_ACCENT).setAlpha(0.55);
+          }
+        };
+        // Row 5 wall: full width, doorways at cols 5–6 (server) and cols 19–20 (frontend)
+        horizWallSegments(5 * TILE + TILE / 2, [
+          { x0: 48,   x1: 240  },
+          { x0: 336,  x1: 912  },
+          { x0: 1008, x1: 1232 }
+        ]);
+        // Row 9 wall: only cols 1–12 (testing/big-room divider). Cols 14–24 OPEN.
+        // Doorway at cols 5–6 (testing↔big-room). Seg B ends at col 13 vert wall.
+        horizWallSegments(9 * TILE + TILE / 2, [
+          { x0: 48,  x1: 240 },
+          { x0: 336, x1: 624 }
+        ]);
+
+        // ── Vertical divider at col 13, only in top band (rows 1–4) and bottom band (rows 10–13).
+        // Meetingroom band (rows 6–8) is one open horizontal corridor.
+        const x13 = 13 * TILE + TILE / 2;  // 648
+        this.add.rectangle(x13, 144, TILE, 4 * TILE, WALL_FILL); // top vert
+        this.add.rectangle(x13, 576, TILE, 4 * TILE, WALL_FILL); // bottom vert
+        this.add.rectangle(x13 - TILE / 2 + 1, 144, 2, 4 * TILE, WALL_ACCENT).setAlpha(0.55);
+        this.add.rectangle(x13 - TILE / 2 + 1, 576, 2, 4 * TILE, WALL_ACCENT).setAlpha(0.55);
+
+        // ── Area chip labels (5 areas)
         const chip = (x, y, txt) =>
           this.add.text(x, y, txt, {
             fontFamily: "ui-monospace, monospace",
@@ -142,18 +224,17 @@
             backgroundColor: "#fffbe8e8",
             padding: { left: 5, right: 5, top: 1, bottom: 1 }
           }).setOrigin(0, 0).setAlpha(0.95);
-        chip(TILE + 8, TILE + 8,             "CEO OFFICE");
-        chip(W - 290,  TILE + 8,             "SERVER ROOM");
-        chip(TILE + 8, H - TILE - 28,        "ARCHIVE");
-        chip(W / 2 - 50, TILE + 8,           "RECEPTION");
+        chip(TILE + 8,      TILE + 8,         "SERVER ROOM");
+        chip(14 * TILE + 8, TILE + 8,         "FRONTEND");
+        chip(W / 2 - 56,    6 * TILE + 8,     "MEETING ROOM");
+        chip(TILE + 8,      10 * TILE + 8,    "TESTING / QA");
 
-        // ── Furniture helpers — always pass key explicitly
+        // ── Furniture helpers
         const tile = (gx, gy, key, frame, depth = 0) => {
           const img = this.add.image(gx, gy, key, frame).setScale(SCALE);
           if (depth) img.setDepth(depth);
           return img;
         };
-
         const placeDesk = (anchorX, anchorY) => {
           tile(anchorX,            anchorY,        "office", OFFICE.DESK_TOP_L);
           tile(anchorX + TILE,     anchorY,        "office", OFFICE.DESK_TOP_M);
@@ -162,82 +243,78 @@
           tile(anchorX + TILE,     anchorY + TILE, "office", OFFICE.DESK_MID_M);
           tile(anchorX + TILE * 2, anchorY + TILE, "office", OFFICE.DESK_MID_R);
         };
+        // Compact 2×1 desk for individual workers (Phase 7B.7). One top row only.
+        const placeSmallDesk = (anchorX, anchorY) => {
+          tile(anchorX,        anchorY, "office", OFFICE.DESK_TOP_L);
+          tile(anchorX + TILE, anchorY, "office", OFFICE.DESK_TOP_R);
+        };
+        // Phase 7B.8: flat-graphics desk that sits cleanly on the white floor without
+        // the LimeZu wood-brown tile look. center = (cx, cy), width in tiles, height = 1 tile.
+        const drawFlatDesk = (cx, cy, widthTiles) => {
+          const w = widthTiles * TILE;
+          const h = TILE; // 48 px
+          const g = this.add.graphics();
+          // light-gray top surface
+          g.fillStyle(0xd2d8de, 1);
+          g.fillRoundedRect(cx - w / 2, cy - h / 2, w, h, 4);
+          // subtle dark border
+          g.lineStyle(1, 0x7a838d, 1);
+          g.strokeRoundedRect(cx - w / 2 + 0.5, cy - h / 2 + 0.5, w, h, 4);
+          // back-edge accent line (defines the "back" of the desk)
+          g.fillStyle(0x7a838d, 1);
+          g.fillRect(cx - w / 2 + 4, cy - h / 2 + 3, w - 8, 2);
+          return g;
+        };
         const placeServerRack = (x, y) => {
-          tile(x, y,        "office", OFFICE.SERVER_TOP);
-          tile(x, y + TILE, "office", OFFICE.SERVER_BOTTOM);
+          // Phase 7B.9: drop SERVER_BOTTOM to avoid the tan/beige base patch on the white floor.
+          // 1-tile rack head only.
+          tile(x, y, "office", OFFICE.SERVER_TOP);
         };
-        const placePrinter = (x, y) => {
-          tile(x,        y, "office", OFFICE.PRINTER_L);
-          tile(x + TILE, y, "office", OFFICE.PRINTER_R);
+        const placeMonitorOnDesk = (deskAnchorX, deskAnchorY, colOffset = 1) => {
+          tile(deskAnchorX + colOffset * TILE, deskAnchorY, "office", OFFICE.MONITOR_BLUE, 10);
         };
-        // Monitor sits ON the back row of the desk (same y as DESK_TOP), rendered
-        // after the desk so it overlays the back-middle tile — looks like a
-        // monitor standing on the desk surface, not floating above.
-        const placeMonitorOnDesk = (deskAnchorX, deskAnchorY, colOffset = 1, frame = OFFICE.MONITOR_BLUE) => {
-          tile(deskAnchorX + colOffset * TILE, deskAnchorY, "office", frame, 10);
-        };
-        // Display board: two stacked tile rows (top+bottom halves) so the
-        // bezel renders complete instead of looking cropped.
         const placeDisplayBoard = (anchorX, anchorY) => {
           tile(anchorX,        anchorY,        "office", OFFICE.DISPLAY_TOP_L);
           tile(anchorX + TILE, anchorY,        "office", OFFICE.DISPLAY_TOP_R);
           tile(anchorX,        anchorY + TILE, "office", OFFICE.DISPLAY_BOT_L);
           tile(anchorX + TILE, anchorY + TILE, "office", OFFICE.DISPLAY_BOT_R);
         };
-        // Office chair beside the char's home — offset to the right by half a tile
-        // and slightly up, so the chair stays visible alongside the standing
-        // character instead of being hidden behind them.
-        const placeChairBeside = (homeX, homeY, frame = OFFICE.CHAIR_BLACK) => {
-          tile(homeX + TILE * 0.7, homeY - TILE / 3, "office", frame, 5);
-        };
 
-        // Geometry: for a 24px gap between the desk's front edge and the
-        // character's head, deskY = homeY - 192 (96px char height + 24px gap
-        // + 72px desk total height from top-row center to bottom-row bottom).
-        const deskYFor = (homeY) => homeY - 192;
-        // Desks are placed 1 TILE left of the char so the 3-tile-wide desk
-        // is horizontally centered on the char's home column.
-        const deskXFor = (homeX) => homeX - TILE;
-
-        // ── CEO OFFICE (top-left)
-        const ceoDeskX = deskXFor(168);                   // 120
-        const ceoDeskY = deskYFor(390);                   // 198
-        placeDesk(ceoDeskX, ceoDeskY);
-        placeMonitorOnDesk(ceoDeskX, ceoDeskY, 1);
-        placeChairBeside(168, 390, OFFICE.CHAIR_ORANGE);
-        // single plant in the CEO corner
-        tile(TILE + TILE / 2, TILE + TILE + TILE / 2, "office", OFFICE.PLANT_GREEN);
-        // complete display board (top + bottom halves) on the top wall
-        placeDisplayBoard(ceoDeskX + TILE * 4, TILE + TILE / 2 + TILE / 4);
-
-        // ── SERVER ROOM (top-right): row of 3 server racks + D'Artagnan's desk + plant
-        const svrX0 = W - TILE * 9;
-        const svrY  = TILE + TILE * 2;
+        // ── SERVER ROOM (cols 1–12, rows 1–4) — 3 racks + D'Art's flat desk bündig in NE corner
         for (let i = 0; i < 3; i++) {
-          placeServerRack(svrX0 + i * TILE * 1.4, svrY);
+          placeServerRack(2 * TILE + 12 + i * TILE * 1.25, 2 * TILE + TILE / 2);
         }
-        const dDeskX = deskXFor(1088);                    // 1040
-        const dDeskY = deskYFor(530);                     // 338
-        placeDesk(dDeskX, dDeskY);
-        placeMonitorOnDesk(dDeskX, dDeskY, 1);
-        placeChairBeside(1088, 530, OFFICE.CHAIR_BLACK);
-        // server-room plant — slot to the left of D'Artagnan's desk
-        tile(dDeskX - TILE, dDeskY + TILE / 2, "office", OFFICE.PLANT_SMALL);
+        drawFlatDesk(576, 72, 2);
+        tile(576, 72, "office", OFFICE.MONITOR_BLUE, 10);
 
-        // ── RECEPTION (middle-top): a single tasteful plant — no more 3-plant cluster
-        tile(W / 2, TILE + TILE * 2, "office", OFFICE.PLANT_GREEN);
+        // ── FRONTEND (cols 14–24, rows 1–4) — design wall + Aramis flat desk in NE corner
+        placeDisplayBoard(17 * TILE, TILE + TILE / 2);
+        drawFlatDesk(1184, 72, 2);
+        tile(1184, 72, "office", OFFICE.MONITOR_BLUE, 10);
 
-        // ── ARCHIVE (bottom): row of 5 filing cabinets + Porthos's desk + monitor + chair + printer
-        const archY = H - TILE * 3;
-        for (let i = 0; i < 5; i++) {
-          tile(TILE + TILE * 2 + i * TILE, archY, "office", OFFICE.FILING_SHELF);
-        }
-        const pDeskX = deskXFor(672);                     // 624
-        const pDeskY = deskYFor(670);                     // 478
-        placeDesk(pDeskX, pDeskY);
-        placeMonitorOnDesk(pDeskX, pDeskY, 1);
-        placeChairBeside(672, 670, OFFICE.CHAIR_BLACK);
-        placePrinter(pDeskX + TILE * 4, pDeskY + TILE / 2);
+        // ── BIG MEETING ROOM (L-shaped: meeting band rows 6–8 full width + lounge cols 14–24
+        // rows 10–13). Phase 7B.9: conf table moved to lounge area, new whiteboard added.
+        // Whiteboard bündig east wall (x_right=1232), top of lounge area
+        placeDisplayBoard(1160, 480 + TILE / 2);
+        // Conference table 3 tiles wide, centered in lounge area
+        drawFlatDesk(864, 504, 3);
+        // Couch — 3-cushion sofa pushed to south of lounge area
+        const couchG = this.add.graphics();
+        const couchCX = 18 * TILE + TILE / 2; // 888
+        const couchCY = 13 * TILE - 12;       // 612
+        couchG.fillStyle(0x4a3a30, 1);
+        couchG.fillRoundedRect(couchCX - 1.6 * TILE, couchCY - 0.55 * TILE, 3.2 * TILE, 1.3 * TILE, 10);
+        couchG.fillStyle(0x826450, 1);
+        couchG.fillRoundedRect(couchCX - 1.5 * TILE,  couchCY - 0.45 * TILE, TILE * 0.9, TILE * 0.95, 5);
+        couchG.fillRoundedRect(couchCX - 0.45 * TILE, couchCY - 0.45 * TILE, TILE * 0.9, TILE * 0.95, 5);
+        couchG.fillRoundedRect(couchCX + 0.6 * TILE,  couchCY - 0.45 * TILE, TILE * 0.9, TILE * 0.95, 5);
+        couchG.fillStyle(0x2a1f18, 1);
+        couchG.fillRect(couchCX - 1.55 * TILE, couchCY - 0.6 * TILE, 3.1 * TILE, 5);
+
+        // ── TESTING / QA (cols 1–12, rows 10–13) — whiteboard + Porthos flat desk in NE corner
+        placeDisplayBoard(2 * TILE, 10 * TILE + TILE / 2);
+        drawFlatDesk(576, 504, 2);
+        tile(576, 504, "office", OFFICE.MONITOR_BLUE, 10);
 
         // ── Agents
         // Registry of agent handles → consumed by SSE event handler for move animations.
@@ -277,15 +354,22 @@
           this._addBreathing(s, { x: agent.homeX, y: agent.homeY });
 
           // Stash a handle for the SSE event handler
+          const stationRaw = agent.stations && agent.stations.work;
+          const gatesRaw = agent.gatePoints || (agent.gatePoint ? [agent.gatePoint] : null);
           agentMap[agent.id] = {
             id: agent.id,
             sprite: s,
-            home: { x: agent.homeX, y: agent.homeY, idleFrame: safeIdle }
+            home: { x: agent.homeX, y: agent.homeY, idleFrame: safeIdle },
+            station: stationRaw ? { x: stationRaw.x, y: stationRaw.y } : null,
+            gatePoints: gatesRaw ? gatesRaw.map(g => ({ x: g.x, y: g.y })) : null,
+            patrolPaused: false,
+            busy: false
           };
 
-          // Name chip floating above (32×3=96 px above feet for 16×32 chars, plus a little)
-          this.add
-            .text(agent.homeX, agent.homeY - 32 * SCALE - 6, agent.displayName, {
+          // Name chip floating above the sprite — tracked per-frame so it follows
+          // walks and patrols (Phase 7B fix). Uses same scene.update() hook as bubbles.
+          const nameText = this.add
+            .text(0, 0, agent.displayName, {
               fontFamily: "ui-monospace, monospace",
               fontSize: "12px",
               color: "#fffbe8",
@@ -294,6 +378,10 @@
             })
             .setOrigin(0.5, 1)
             .setAlpha(0.92);
+          const NAME_Y_OFFSET = -32 * SCALE - 6; // 102 px above feet
+          nameText.setPosition(agent.homeX, agent.homeY + NAME_Y_OFFSET);
+          if (!this._liveNameChips) this._liveNameChips = [];
+          this._liveNameChips.push({ text: nameText, sprite: s, offset: NAME_Y_OFFSET });
 
           // ── Debug overlay — only when ?debug=1
           if (DEBUG) {
@@ -330,6 +418,15 @@
             });
           }
         });
+
+        // ── Porthos patrols permanently between testing-room whiteboard (y=600) and
+        // server-room top (y=192), passing through both doorways at x=264.
+        if (agentMap.porthos) this._startPorthosPatrol(agentMap.porthos);
+
+        // Debug exposure for headless tests (Phase 7B verify step).
+        if (DEBUG) {
+          window.__office = { scene: this, agentMap };
+        }
 
         // ── Debug banner + Phase 3 trigger buttons (top-left)
         if (DEBUG) {
@@ -507,16 +604,22 @@
         if (!agentId || !action) return;
         if (action === "idle") return;
         if (action === "hello") return; // already handled by named listener
-        const data = this._sseState && this._sseState.agentMap
-          ? this._sseState.agentMap[agentId]
-          : null;
+        const map = this._sseState && this._sseState.agentMap;
+        const data = map ? map[agentId] : null;
         if (!data) return console.warn("[office] unknown agent:", agentId);
 
-        const label = (event.meta && event.meta.file) ? event.meta.file : action;
-        this._showBubble(data.sprite, data.home, label);
+        // Wienerische Sprechblase statt rohem action-String
+        const file = event.meta && event.meta.file;
+        const phrase = pickPhrase(action, file);
+        this._showBubble(data.sprite, data.home, phrase);
+
+        // Reactive Paul gesture for any non-Paul, non-Porthos-patrol event
+        if (agentId !== "paul" && map && map.paul) {
+          this._paulGesture(map.paul, agentId);
+        }
 
         if (action === "code.write" || action === "code.bash") {
-          this._actionNudge(data, action);
+          this._actionWalkToStation(data, action);
         } else if (action === "git.push") {
           this._actionGitPush(data);
         } else {
@@ -524,45 +627,162 @@
         }
       }
 
-      _actionNudge(data, action) {
-        const { sprite, home } = data;
-        const vec = ACTION_VECTORS[action] && ACTION_VECTORS[action][sprite.texture.key.replace("char_", "")];
-        // sprite.texture.key is "char_paul" → strip prefix
-        const vector = vec || { dx: -90, dy: 0, dir: "left" };
-        const dur = 1100; // ms one-way → ~2.2s total round-trip
+      // Phase 7B.9: traverse a list of waypoints (home → gates… → station, then reverse).
+      // Routes around walls when home is in big room and station is in a walled-off work room.
+      _actionWalkToStation(data, action) {
+        const { sprite, home, station, gatePoints } = data;
+        if (!station) return;
+        if (data.busy) return;
 
+        data.busy = true;
+        if (data.id === "porthos") data.patrolPaused = true;
         this.tweens.killTweensOf(sprite);
-        sprite.y = home.y;
-        const startX = home.x;
-        const startY = home.y;
 
-        const walkKey = `${data.id || sprite.texture.key.replace("char_", "")}-walk-${vector.dir}`;
-        if (this.anims.exists(walkKey)) sprite.play(walkKey);
-
-        const settle = () => {
+        const dur = 1000;
+        const id = data.id;
+        const segment = (fx, fy, tx, ty, onDone) => {
+          const dx = tx - fx, dy = ty - fy;
+          const dir = Math.abs(dy) >= Math.abs(dx)
+            ? (dy < 0 ? "up" : "down")
+            : (dx < 0 ? "left" : "right");
+          const key = `${id}-walk-${dir}`;
+          if (this.anims.exists(key)) sprite.play(key);
+          this.tweens.add({
+            targets: sprite, x: tx, y: ty, duration: dur, ease: "Sine.inOut",
+            onComplete: onDone
+          });
+        };
+        const traverse = (pts, onDone) => {
+          let cur = { x: sprite.x, y: sprite.y };
+          let i = 0;
+          const next = () => {
+            if (i >= pts.length) { onDone(); return; }
+            const wp = pts[i++];
+            segment(cur.x, cur.y, wp.x, wp.y, () => { cur = wp; next(); });
+          };
+          next();
+        };
+        const resume = () => {
           sprite.stop();
           sprite.setFrame(home.idleFrame);
           sprite.setPosition(home.x, home.y);
           this._addBreathing(sprite, home);
+          data.busy = false;
+          if (id === "porthos") {
+            data.patrolPaused = false;
+            this._startPorthosPatrol(data);
+          }
         };
 
+        const out  = gatePoints ? [...gatePoints, station] : [station];
+        const back = gatePoints ? [...[...gatePoints].reverse(), home] : [home];
+
+        traverse(out, () => {
+          sprite.stop();
+          sprite.setFrame(home.idleFrame);
+          this.time.delayedCall(800, () => traverse(back, resume));
+        });
+      }
+
+      // Reactive "ich teile einen Auftrag aus"-Geste: Paul wechselt für 600ms in die
+      // walk-Richtung des Adressaten und kehrt dann zum back-Idle zurück.
+      _paulGesture(paulData, towardAgentId) {
+        if (paulData.busy) return;
+        const { sprite, home } = paulData;
+        const dir = {
+          dartagnan: "left",   // NW
+          aramis:    "right",  // NE
+          porthos:   "left"    // SW
+        }[towardAgentId] || "up";
+        const walkKey = `paul-walk-${dir}`;
+        if (!this.anims.exists(walkKey)) return;
+
+        this.tweens.killTweensOf(sprite);
+        sprite.play(walkKey);
+        // tiny half-tile step in the gesture direction, then back (TILE/2 = 24)
+        const step = 24;
+        const dx = dir === "left" ? -step : dir === "right" ? step : 0;
+        const dy = dir === "up" ? -step : dir === "down" ? step : 0;
+
+        paulData.busy = true;
         this.tweens.add({
-          targets: sprite,
-          x: startX + vector.dx,
-          y: startY + vector.dy,
-          duration: dur,
-          ease: "Sine.inOut",
+          targets: sprite, x: home.x + dx, y: home.y + dy,
+          duration: 300, ease: "Sine.inOut",
           onComplete: () => {
-            const back = { left: "right", right: "left", up: "down", down: "up" }[vector.dir];
-            const backKey = `${data.id || sprite.texture.key.replace("char_", "")}-walk-${back}`;
-            if (this.anims.exists(backKey)) sprite.play(backKey);
             this.tweens.add({
               targets: sprite, x: home.x, y: home.y,
-              duration: dur, ease: "Sine.inOut",
-              onComplete: settle
+              duration: 300, ease: "Sine.inOut",
+              onComplete: () => {
+                sprite.stop();
+                sprite.setFrame(home.idleFrame); // back to back-still
+                this._addBreathing(sprite, home);
+                paulData.busy = false;
+              }
             });
           }
         });
+      }
+
+      // Porthos walks a permanent vertical loop x=264 between y=192 (server room) and
+      // y=600 (testing whiteboard), passing through both doorways. Occasional patrol
+      // bubble. Pauses when patrolPaused=true (e.g. during an event-driven walk).
+      _startPorthosPatrol(porthos) {
+        if (porthos.patrolPaused || porthos.busy) return;
+        const sprite = porthos.sprite;
+        const X = 304;         // patrol axis = porthos.homeX (passes through both doorways)
+        const Y_TOP = 192;     // deep inside server room
+        const Y_BOTTOM = 600;  // in front of testing whiteboard
+        const oneWayMs = 7000;
+
+        // Periodic patrol bubble (~ every 14s; pause if busy)
+        if (!this._porthosBubbleTimer) {
+          this._porthosBubbleTimer = this.time.addEvent({
+            delay: 14000,
+            loop: true,
+            callback: () => {
+              if (!porthos.patrolPaused && !porthos.busy) {
+                const pool = BUBBLE_LINES["porthos.patrol"];
+                const line = pool[Math.floor(Math.random() * pool.length)];
+                this._showBubble(sprite, porthos.home, line);
+              }
+            }
+          });
+        }
+
+        const goUp = () => {
+          if (porthos.patrolPaused || porthos.busy) return;
+          sprite.play("porthos-walk-up");
+          this.tweens.add({
+            targets: sprite, x: X, y: Y_TOP,
+            duration: oneWayMs, ease: "Sine.inOut",
+            onComplete: () => {
+              if (porthos.patrolPaused || porthos.busy) return;
+              sprite.stop();
+              sprite.setFrame(porthos.home.idleFrame);
+              this.time.delayedCall(700, goDown);
+            }
+          });
+        };
+        const goDown = () => {
+          if (porthos.patrolPaused || porthos.busy) return;
+          sprite.play("porthos-walk-down");
+          this.tweens.add({
+            targets: sprite, x: X, y: Y_BOTTOM,
+            duration: oneWayMs, ease: "Sine.inOut",
+            onComplete: () => {
+              if (porthos.patrolPaused || porthos.busy) return;
+              sprite.stop();
+              sprite.setFrame(porthos.home.idleFrame);
+              this.time.delayedCall(700, goUp);
+            }
+          });
+        };
+
+        // Start by walking toward whichever endpoint is farther
+        const distTop = Math.abs(sprite.y - Y_TOP);
+        const distBot = Math.abs(sprite.y - Y_BOTTOM);
+        if (distTop >= distBot) goUp();
+        else                    goDown();
       }
 
       _actionGitPush(data) {
@@ -666,12 +886,22 @@
       // Scene hook: Phaser calls update(time, delta) every frame. We use it
       // to drag any live speech bubbles along with their sprites.
       update() {
-        const list = this._liveBubbles;
-        if (!list || !list.length) return;
-        for (let i = 0; i < list.length; i++) {
-          const b = list[i];
-          if (b.container && b.container.active && b.sprite && b.sprite.active) {
-            b.container.setPosition(b.sprite.x, b.sprite.y + b.offset);
+        const bubbles = this._liveBubbles;
+        if (bubbles && bubbles.length) {
+          for (let i = 0; i < bubbles.length; i++) {
+            const b = bubbles[i];
+            if (b.container && b.container.active && b.sprite && b.sprite.active) {
+              b.container.setPosition(b.sprite.x, b.sprite.y + b.offset);
+            }
+          }
+        }
+        const chips = this._liveNameChips;
+        if (chips && chips.length) {
+          for (let i = 0; i < chips.length; i++) {
+            const c = chips[i];
+            if (c.text && c.text.active && c.sprite && c.sprite.active) {
+              c.text.setPosition(c.sprite.x, c.sprite.y + c.offset);
+            }
           }
         }
       }
@@ -688,9 +918,11 @@
         };
 
         const triggers = [
-          { label: "▶ code.write @ dartagnan", fn: fire("dartagnan", "code.write", { file: "server.js" }) },
-          { label: "▶ code.bash  @ paul",       fn: fire("paul",       "code.bash",  { cmd: "npm test" }) },
-          { label: "▶ git.push   @ porthos",    fn: fire("porthos",    "git.push",   { branch: "main" }) }
+          { label: "▶ code.write @ dartagnan", fn: fire("dartagnan", "code.write", { file: "005_users.sql" }) },
+          { label: "▶ code.write @ aramis",    fn: fire("aramis",    "code.write", { file: "index.html" }) },
+          { label: "▶ code.write @ porthos",   fn: fire("porthos",   "code.write", { file: "test.mjs" }) },
+          { label: "▶ code.bash  @ dartagnan", fn: fire("dartagnan", "code.bash",  { file: "npm test" }) },
+          { label: "▶ git.push   @ porthos",   fn: fire("porthos",   "git.push",   { branch: "main" }) }
         ];
 
         let y = 32;

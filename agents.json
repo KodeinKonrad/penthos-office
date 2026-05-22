@@ -5,13 +5,13 @@
     "role": "CEO",
     "spritesheetKey": "char_paul",
     "spritesheetPath": "assets/sprites/char_paul.png",
-    "idleFrame": 3,
+    "idleFrame": 1,
     "walkDownFrames":  [74, 75, 76, 77, 78, 79],
     "walkUpFrames":    [62, 63, 64, 65, 66, 67],
     "walkLeftFrames":  [56, 57, 58, 59, 60, 61],
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
-    "homeX": 168,
-    "homeY": 390,
+    "homeX": 820,
+    "homeY": 552,
     "stations": {}
   },
   {
@@ -25,14 +25,31 @@
     "walkUpFrames":    [62, 63, 64, 65, 66, 67],
     "walkLeftFrames":  [56, 57, 58, 59, 60, 61],
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
-    "homeX": 1088,
-    "homeY": 530,
-    "stations": {}
+    "homeX": 720,
+    "homeY": 480,
+    "gatePoints": [{ "x": 720, "y": 384 }, { "x": 264, "y": 384 }],
+    "stations": { "work": { "x": 240, "y": 216 } }
+  },
+  {
+    "id": "aramis",
+    "displayName": "Aramis",
+    "role": "Frontend Designer",
+    "spritesheetKey": "char_aramis",
+    "spritesheetPath": "assets/sprites/char_aramis.png",
+    "idleFrame": 3,
+    "walkDownFrames":  [74, 75, 76, 77, 78, 79],
+    "walkUpFrames":    [62, 63, 64, 65, 66, 67],
+    "walkLeftFrames":  [56, 57, 58, 59, 60, 61],
+    "walkRightFrames": [68, 69, 70, 71, 72, 73],
+    "homeX": 1000,
+    "homeY": 552,
+    "gatePoints": [{ "x": 1000, "y": 384 }],
+    "stations": { "work": { "x": 936, "y": 216 } }
   },
   {
     "id": "porthos",
     "displayName": "Porthos",
-    "role": "Archivist",
+    "role": "QA Patroller",
     "spritesheetKey": "char_porthos",
     "spritesheetPath": "assets/sprites/char_porthos.png",
     "idleFrame": 3,
@@ -40,8 +57,8 @@
     "walkUpFrames":    [62, 63, 64, 65, 66, 67],
     "walkLeftFrames":  [56, 57, 58, 59, 60, 61],
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
-    "homeX": 672,
-    "homeY": 670,
-    "stations": {}
+    "homeX": 304,
+    "homeY": 408,
+    "stations": { "work": { "x": 304, "y": 600 } }
   }
 ]
