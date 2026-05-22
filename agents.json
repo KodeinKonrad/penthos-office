@@ -49,7 +49,7 @@
   {
     "id": "porthos",
     "displayName": "Porthos",
-    "role": "QA Patroller",
+    "role": "QA Lead",
     "spritesheetKey": "char_porthos",
     "spritesheetPath": "assets/sprites/char_porthos.png",
     "idleFrame": 3,
@@ -57,8 +57,9 @@
     "walkUpFrames":    [62, 63, 64, 65, 66, 67],
     "walkLeftFrames":  [56, 57, 58, 59, 60, 61],
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
-    "homeX": 304,
+    "homeX": 450,
     "homeY": 408,
-    "stations": { "work": { "x": 304, "y": 600 } }
+    "gatePoints": [{ "x": 264, "y": 408 }, { "x": 264, "y": 552 }],
+    "stations": { "work": { "x": 576, "y": 552 } }
   }
 ]

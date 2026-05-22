@@ -32,7 +32,7 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-22T15:30:00Z";
+    const BUILD_VERSION = "2026-05-22T17:00:00Z";
 
     // ── Phase 3: SSE endpoint + action handlers
     // Frontend is READ-ONLY: subscribes to /events, never POSTs.
@@ -99,13 +99,6 @@
         "Push is draussen",
         "Hopp, nach GitHub",
         "Commit unterwegs"
-      ],
-      "porthos.patrol": [
-        "I schau ob eh ois passt",
-        "Alles im grünen Bereich?",
-        "Kontrollgang",
-        "Schau ma mal",
-        "Alles ruhig hier"
       ]
     };
 
@@ -200,11 +193,12 @@
           { x0: 336,  x1: 912  },
           { x0: 1008, x1: 1232 }
         ]);
-        // Row 9 wall: only cols 1–12 (testing/big-room divider). Cols 14–24 OPEN.
-        // Doorway at cols 5–6 (testing↔big-room). Seg B ends at col 13 vert wall.
+        // Row 9 wall: cols 1–13 (testing/big-room divider). Cols 14–24 OPEN.
+        // Doorway at cols 5–6 (testing↔big-room). Seg B reaches x=672 so it closes
+        // the corner against the col-13 vertical wall (Phase 7C FIX 1).
         horizWallSegments(9 * TILE + TILE / 2, [
           { x0: 48,  x1: 240 },
-          { x0: 336, x1: 624 }
+          { x0: 336, x1: 672 }
         ]);
 
         // ── Vertical divider at col 13, only in top band (rows 1–4) and bottom band (rows 10–13).
@@ -362,8 +356,9 @@
             home: { x: agent.homeX, y: agent.homeY, idleFrame: safeIdle },
             station: stationRaw ? { x: stationRaw.x, y: stationRaw.y } : null,
             gatePoints: gatesRaw ? gatesRaw.map(g => ({ x: g.x, y: g.y })) : null,
-            patrolPaused: false,
-            busy: false
+            busy: false,
+            idleBusy: false,
+            idleTimer: null
           };
 
           // Name chip floating above the sprite — tracked per-frame so it follows
@@ -419,9 +414,10 @@
           }
         });
 
-        // ── Porthos patrols permanently between testing-room whiteboard (y=600) and
-        // server-room top (y=192), passing through both doorways at x=264.
-        if (agentMap.porthos) this._startPorthosPatrol(agentMap.porthos);
+        // ── Sporadic idle behavior for all non-Paul agents (Phase 7C FIX 3).
+        // Paul stays back-to-room at the conference table; the others occasionally
+        // wander to the couch, glance at the lounge whiteboard, or shift in place.
+        Object.values(agentMap).forEach(a => this._startIdleBehavior(a));
 
         // Debug exposure for headless tests (Phase 7B verify step).
         if (DEBUG) {
@@ -632,10 +628,12 @@
       _actionWalkToStation(data, action) {
         const { sprite, home, station, gatePoints } = data;
         if (!station) return;
+        // If mid-idle (couch/whiteboard/wander), preempt it: kill its tween + timer
+        // and continue with the event walk from the agent's current position.
+        if (data.idleBusy) this._cancelIdle(data);
         if (data.busy) return;
 
         data.busy = true;
-        if (data.id === "porthos") data.patrolPaused = true;
         this.tweens.killTweensOf(sprite);
 
         const dur = 1000;
@@ -668,10 +666,7 @@
           sprite.setPosition(home.x, home.y);
           this._addBreathing(sprite, home);
           data.busy = false;
-          if (id === "porthos") {
-            data.patrolPaused = false;
-            this._startPorthosPatrol(data);
-          }
+          this._scheduleNextIdle(data);
         };
 
         const out  = gatePoints ? [...gatePoints, station] : [station];
@@ -723,74 +718,113 @@
         });
       }
 
-      // Porthos walks a permanent vertical loop x=264 between y=192 (server room) and
-      // y=600 (testing whiteboard), passing through both doorways. Occasional patrol
-      // bubble. Pauses when patrolPaused=true (e.g. during an event-driven walk).
-      _startPorthosPatrol(porthos) {
-        if (porthos.patrolPaused || porthos.busy) return;
-        const sprite = porthos.sprite;
-        const X = 304;         // patrol axis = porthos.homeX (passes through both doorways)
-        const Y_TOP = 192;     // deep inside server room
-        const Y_BOTTOM = 600;  // in front of testing whiteboard
-        const oneWayMs = 7000;
+      // ── Sporadic idle behavior (Phase 7C FIX 3).
+      // Non-Paul agents occasionally leave their idle home to do something small —
+      // sit on the couch, glance at the lounge whiteboard, or shift a couple of
+      // tiles and come back. Timer fires every 9–22s; if the agent is busy with an
+      // event walk, the tick is skipped and rescheduled. Any incoming event
+      // preempts the idle action via _cancelIdle().
+      _startIdleBehavior(agentData) {
+        if (agentData.id === "paul") return;
+        this._scheduleNextIdle(agentData);
+      }
 
-        // Periodic patrol bubble (~ every 14s; pause if busy)
-        if (!this._porthosBubbleTimer) {
-          this._porthosBubbleTimer = this.time.addEvent({
-            delay: 14000,
-            loop: true,
-            callback: () => {
-              if (!porthos.patrolPaused && !porthos.busy) {
-                const pool = BUBBLE_LINES["porthos.patrol"];
-                const line = pool[Math.floor(Math.random() * pool.length)];
-                this._showBubble(sprite, porthos.home, line);
-              }
-            }
-          });
+      _scheduleNextIdle(agentData) {
+        if (agentData.id === "paul") return;
+        if (agentData.idleTimer) { agentData.idleTimer.remove(); agentData.idleTimer = null; }
+        const delay = 9000 + Math.random() * 13000;
+        agentData.idleTimer = this.time.delayedCall(delay, () => {
+          agentData.idleTimer = null;
+          if (agentData.busy) { this._scheduleNextIdle(agentData); return; }
+          this._performIdleAction(agentData);
+        });
+      }
+
+      _cancelIdle(agentData) {
+        if (agentData.idleTimer) { agentData.idleTimer.remove(); agentData.idleTimer = null; }
+        if (agentData.idleBusy) {
+          this.tweens.killTweensOf(agentData.sprite);
+          agentData.idleBusy = false;
+          agentData.busy = false;
         }
+      }
 
-        const goUp = () => {
-          if (porthos.patrolPaused || porthos.busy) return;
-          sprite.play("porthos-walk-up");
+      _performIdleAction(agentData) {
+        // Weighted choice: 50% small shift, 25% couch, 25% lounge whiteboard.
+        // Shifts are quick and look like fidgeting; couch/whiteboard are longer trips.
+        const r = Math.random();
+        let target, pauseMs;
+        if (r < 0.5) {
+          // Small wander near home
+          const dx = (Math.random() - 0.5) * 120;
+          const dy = (Math.random() - 0.5) * 60;
+          target = { x: agentData.home.x + dx, y: agentData.home.y + dy };
+          pauseMs = 1500 + Math.random() * 2000;
+        } else if (r < 0.75) {
+          // Couch in lounge — three seat slots so multiple agents don't pile up
+          const seats = [{ x: 840, y: 600 }, { x: 888, y: 600 }, { x: 936, y: 600 }];
+          target = seats[Math.floor(Math.random() * seats.length)];
+          pauseMs = 5500 + Math.random() * 4000;
+        } else {
+          // Glance at the lounge whiteboard (placeDisplayBoard anchor 1160, 504)
+          target = { x: 1184, y: 624 };
+          pauseMs = 2200 + Math.random() * 1800;
+        }
+        this._idleWalkTo(agentData, target.x, target.y, pauseMs);
+      }
+
+      _idleWalkTo(agentData, tx, ty, pauseMs) {
+        const { sprite, home, id } = agentData;
+        if (agentData.busy) { this._scheduleNextIdle(agentData); return; }
+        agentData.busy = true;
+        agentData.idleBusy = true;
+        this.tweens.killTweensOf(sprite);
+
+        const walk = (fx, fy, gx, gy, onDone) => {
+          const dx = gx - fx, dy = gy - fy;
+          if (Math.abs(dx) < 2 && Math.abs(dy) < 2) { onDone(); return; }
+          const dir = Math.abs(dy) >= Math.abs(dx)
+            ? (dy < 0 ? "up" : "down")
+            : (dx < 0 ? "left" : "right");
+          const key = `${id}-walk-${dir}`;
+          if (this.anims.exists(key)) sprite.play(key);
+          const dist = Math.hypot(dx, dy);
+          const dur = Math.max(400, dist * 7);
           this.tweens.add({
-            targets: sprite, x: X, y: Y_TOP,
-            duration: oneWayMs, ease: "Sine.inOut",
-            onComplete: () => {
-              if (porthos.patrolPaused || porthos.busy) return;
-              sprite.stop();
-              sprite.setFrame(porthos.home.idleFrame);
-              this.time.delayedCall(700, goDown);
-            }
+            targets: sprite, x: gx, y: gy, duration: dur, ease: "Sine.inOut",
+            onComplete: onDone
           });
         };
-        const goDown = () => {
-          if (porthos.patrolPaused || porthos.busy) return;
-          sprite.play("porthos-walk-down");
-          this.tweens.add({
-            targets: sprite, x: X, y: Y_BOTTOM,
-            duration: oneWayMs, ease: "Sine.inOut",
-            onComplete: () => {
-              if (porthos.patrolPaused || porthos.busy) return;
-              sprite.stop();
-              sprite.setFrame(porthos.home.idleFrame);
-              this.time.delayedCall(700, goUp);
-            }
-          });
-        };
 
-        // Start by walking toward whichever endpoint is farther
-        const distTop = Math.abs(sprite.y - Y_TOP);
-        const distBot = Math.abs(sprite.y - Y_BOTTOM);
-        if (distTop >= distBot) goUp();
-        else                    goDown();
+        walk(sprite.x, sprite.y, tx, ty, () => {
+          if (!agentData.idleBusy) return; // preempted
+          sprite.stop();
+          sprite.setFrame(home.idleFrame);
+          this.time.delayedCall(pauseMs, () => {
+            if (!agentData.idleBusy) return; // preempted during pause
+            walk(sprite.x, sprite.y, home.x, home.y, () => {
+              if (!agentData.idleBusy) return;
+              sprite.stop();
+              sprite.setFrame(home.idleFrame);
+              sprite.setPosition(home.x, home.y);
+              this._addBreathing(sprite, home);
+              agentData.idleBusy = false;
+              agentData.busy = false;
+              this._scheduleNextIdle(agentData);
+            });
+          });
+        });
       }
 
       _actionGitPush(data) {
         const { sprite, home } = data;
+        if (data.idleBusy) this._cancelIdle(data);
+        if (data.busy) return;
+        data.busy = true;
         const targetY = home.y + 200; // off-canvas downwards
 
         this.tweens.killTweensOf(sprite);
-        sprite.y = home.y;
+        sprite.setPosition(home.x, home.y);
 
         const walkKey = `${sprite.texture.key.replace("char_", "")}-walk-down`;
         if (this.anims.exists(walkKey)) sprite.play(walkKey);
@@ -812,7 +846,11 @@
                 alpha: 1,
                 duration: 400,
                 ease: "Sine.out",
-                onComplete: () => this._addBreathing(sprite, home)
+                onComplete: () => {
+                  this._addBreathing(sprite, home);
+                  data.busy = false;
+                  this._scheduleNextIdle(data);
+                }
               });
             });
           }
