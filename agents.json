@@ -12,7 +12,8 @@
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
     "homeX": 820,
     "homeY": 552,
-    "stations": {}
+    "homeWaypoint": "SEAT_PAUL",
+    "workStations": ["LG_WHITEBOARD"]
   },
   {
     "id": "dartagnan",
@@ -27,8 +28,8 @@
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
     "homeX": 720,
     "homeY": 480,
-    "gatePoints": [{ "x": 720, "y": 384 }, { "x": 264, "y": 384 }],
-    "stations": { "work": { "x": 240, "y": 216 } }
+    "homeWaypoint": "SEAT_DART",
+    "workStations": ["SR_DESK_PC", "SR_RACK_INSPECT"]
   },
   {
     "id": "aramis",
@@ -43,8 +44,8 @@
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
     "homeX": 1000,
     "homeY": 552,
-    "gatePoints": [{ "x": 1000, "y": 384 }],
-    "stations": { "work": { "x": 936, "y": 216 } }
+    "homeWaypoint": "SEAT_ARAMIS",
+    "workStations": ["FR_DESK_PC", "FR_DISPLAY"]
   },
   {
     "id": "porthos",
@@ -57,9 +58,9 @@
     "walkUpFrames":    [62, 63, 64, 65, 66, 67],
     "walkLeftFrames":  [56, 57, 58, 59, 60, 61],
     "walkRightFrames": [68, 69, 70, 71, 72, 73],
-    "homeX": 450,
-    "homeY": 408,
-    "gatePoints": [{ "x": 264, "y": 408 }, { "x": 264, "y": 552 }],
-    "stations": { "work": { "x": 576, "y": 552 } }
+    "homeX": 940,
+    "homeY": 480,
+    "homeWaypoint": "SEAT_PORTHOS",
+    "kontrollgang": ["TS_WB", "SR_RACK_INSPECT", "FR_DISPLAY"]
   }
 ]

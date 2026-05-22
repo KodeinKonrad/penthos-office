@@ -32,7 +32,7 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-22T17:00:00Z";
+    const BUILD_VERSION = "2026-05-22T20:30:00Z";
 
     // ── Phase 3: SSE endpoint + action handlers
     // Frontend is READ-ONLY: subscribes to /events, never POSTs.
@@ -129,6 +129,147 @@
     const CHAR_SHEET_COLS = 56;
     const CHAR_SHEET_ROWS = 20;
     const CHAR_FRAME_COUNT = CHAR_SHEET_COLS * CHAR_SHEET_ROWS;
+
+    // ── Phase 7D: Waypoint-Graph. Feste, von Hand verlegte Routen — kein A*.
+    // Jeder Schritt einer Figur ist ein gerader Tween zwischen zwei benachbarten
+    // Waypoints. Furniture-Bboxes werden NIE von Feet-Positionen entlang dieser
+    // Pfade durchquert (Edges sind händisch so gelegt). Sprite-Body kann
+    // gelegentlich visuell hinter einem Möbel liegen — übliche Top-Down-2D-Konvention.
+    //
+    // Möbel-Bboxes (zur Erinnerung beim Erweitern, kein Code-Check):
+    //   Server-Racks  : x 84-252,   y 96-144   (3 racks geclustert)
+    //   D'Art-Desk    : x 528-624,  y 48-96    (Server-Room)
+    //   FR-Display    : x 792-888,  y 48-144   (Frontend wall)
+    //   Aramis-Desk   : x 1136-1232, y 48-96   (Frontend NE)
+    //   Conf-Table    : x 792-936,  y 480-528  (Lounge center)
+    //   Couch         : x 811-965,  y 581-643  (Lounge S)
+    //   Lounge-WB     : x 1136-1232, y 480-576 (Lounge E wall)
+    //   Testing-WB    : x 72-168,   y 480-576  (Testing W wall)
+    //   Porthos-Desk  : x 528-624,  y 480-528  (Testing center)
+    const WAYPOINTS = {
+      // Idle seats around conference table (4)
+      SEAT_PAUL:        { x: 820, y: 552 },
+      SEAT_DART:        { x: 720, y: 480 },
+      SEAT_ARAMIS:      { x: 1000, y: 552 },
+      SEAT_PORTHOS:     { x: 940, y: 480 },
+
+      // Perimeter pivots — feet-clean exit from each seat
+      PVT_DART:         { x: 720, y: 432 },
+      PVT_PAUL_S:       { x: 760, y: 552 },
+      PVT_PAUL_N:       { x: 760, y: 432 },
+      PVT_ARAMIS:       { x: 1000, y: 432 },
+      PVT_PORTHOS:      { x: 940, y: 432 },
+
+      // Meeting band spine (y=408, furniture-free corridor under row 5)
+      MB_LOUNGE_W:      { x: 700, y: 408 },
+      MB_LOUNGE_E:      { x: 1000, y: 408 },
+      MB_CENTER:        { x: 576, y: 408 },
+      MB_TS:            { x: 288, y: 408 },  // N of testing doorway
+      MB_SR:            { x: 288, y: 312 },  // S of server doorway
+      MB_E_NORTH:       { x: 960, y: 408 },  // vertical alignment for FR doorway
+      MB_FR:            { x: 960, y: 312 },  // S of frontend doorway
+
+      // Doorway pivots (inside doorway, midpoint)
+      SR_DOOR:          { x: 288, y: 264 },
+      FR_DOOR:          { x: 960, y: 264 },
+      TS_DOOR:          { x: 288, y: 456 },
+
+      // Server room
+      SR_AISLE:         { x: 288, y: 192 },
+      SR_RACK_INSPECT:  { x: 288, y: 168 },  // close to rack cluster south
+      SR_DESK_APPROACH: { x: 576, y: 192 },
+      SR_DESK_PC:       { x: 576, y: 120 },  // D'Art at his monitor
+
+      // Frontend
+      FR_AISLE:         { x: 960, y: 192 },
+      FR_DISPLAY:       { x: 864, y: 192 },  // S of FR display board (Aramis 2nd station)
+      FR_DESK_APPROACH: { x: 1184, y: 192 },
+      FR_DESK_PC:       { x: 1184, y: 120 },
+
+      // Testing
+      TS_AISLE:         { x: 288, y: 552 },
+      TS_WB_APPROACH:   { x: 120, y: 552 },
+      TS_WB:            { x: 120, y: 624 },  // S of testing whiteboard (Porthos Kontrollgang stop)
+      TS_DESK_PC:       { x: 576, y: 552 },  // Porthos's old desk — still in graph for Kontrollgang reachability
+
+      // Lounge whiteboard (Paul's work station)
+      LG_WB_APPROACH:   { x: 1184, y: 432 },
+      LG_WHITEBOARD:    { x: 1184, y: 624 }
+    };
+
+    // Edges = bidirectional adjacency. Listed once per neighbor pair.
+    const EDGES = {
+      SEAT_PAUL:        ["PVT_PAUL_S"],
+      SEAT_DART:        ["PVT_DART"],
+      SEAT_ARAMIS:      ["PVT_ARAMIS"],
+      SEAT_PORTHOS:     ["PVT_PORTHOS"],
+
+      PVT_PAUL_S:       ["SEAT_PAUL", "PVT_PAUL_N"],
+      PVT_PAUL_N:       ["PVT_PAUL_S", "PVT_DART", "PVT_PORTHOS", "MB_LOUNGE_W"],
+      PVT_DART:         ["SEAT_DART", "PVT_PAUL_N", "MB_LOUNGE_W"],
+      PVT_PORTHOS:      ["SEAT_PORTHOS", "PVT_PAUL_N", "PVT_ARAMIS"],
+      PVT_ARAMIS:       ["SEAT_ARAMIS", "PVT_PORTHOS", "MB_LOUNGE_E", "LG_WB_APPROACH"],
+
+      MB_LOUNGE_W:      ["PVT_DART", "PVT_PAUL_N", "MB_CENTER"],
+      MB_LOUNGE_E:      ["PVT_ARAMIS", "MB_E_NORTH", "MB_CENTER"],
+      MB_CENTER:        ["MB_LOUNGE_W", "MB_LOUNGE_E", "MB_TS"],
+      MB_E_NORTH:       ["MB_LOUNGE_E", "MB_FR"],
+      MB_TS:            ["MB_CENTER", "MB_SR", "TS_DOOR"],
+      MB_SR:            ["MB_TS", "SR_DOOR"],
+      MB_FR:            ["MB_E_NORTH", "FR_DOOR"],
+
+      SR_DOOR:          ["MB_SR", "SR_AISLE"],
+      SR_AISLE:         ["SR_DOOR", "SR_RACK_INSPECT", "SR_DESK_APPROACH"],
+      SR_RACK_INSPECT:  ["SR_AISLE"],
+      SR_DESK_APPROACH: ["SR_AISLE", "SR_DESK_PC"],
+      SR_DESK_PC:       ["SR_DESK_APPROACH"],
+
+      FR_DOOR:          ["MB_FR", "FR_AISLE"],
+      FR_AISLE:         ["FR_DOOR", "FR_DISPLAY", "FR_DESK_APPROACH"],
+      FR_DISPLAY:       ["FR_AISLE"],
+      FR_DESK_APPROACH: ["FR_AISLE", "FR_DESK_PC"],
+      FR_DESK_PC:       ["FR_DESK_APPROACH"],
+
+      TS_DOOR:          ["MB_TS", "TS_AISLE"],
+      TS_AISLE:         ["TS_DOOR", "TS_WB_APPROACH", "TS_DESK_PC"],
+      TS_WB_APPROACH:   ["TS_AISLE", "TS_WB"],
+      TS_WB:            ["TS_WB_APPROACH"],
+      TS_DESK_PC:       ["TS_AISLE"],
+
+      LG_WB_APPROACH:   ["PVT_ARAMIS", "LG_WHITEBOARD"],
+      LG_WHITEBOARD:    ["LG_WB_APPROACH"]
+    };
+
+    // BFS shortest path (waypoint count, not euclidean). Returns array of waypoint keys
+    // including start + end, or null if unreachable.
+    function findPath(startKey, endKey) {
+      if (startKey === endKey) return [endKey];
+      const visited = new Set([startKey]);
+      const queue = [[startKey]];
+      while (queue.length) {
+        const path = queue.shift();
+        const last = path[path.length - 1];
+        const neighbors = EDGES[last] || [];
+        for (const n of neighbors) {
+          if (visited.has(n)) continue;
+          visited.add(n);
+          if (n === endKey) return [...path, n];
+          queue.push([...path, n]);
+        }
+      }
+      return null;
+    }
+
+    // Returns key of the waypoint nearest to (x, y).
+    function findNearestWaypoint(x, y) {
+      let best = null, bestD = Infinity;
+      for (const k of Object.keys(WAYPOINTS)) {
+        const w = WAYPOINTS[k];
+        const d = (w.x - x) * (w.x - x) + (w.y - y) * (w.y - y);
+        if (d < bestD) { bestD = d; best = k; }
+      }
+      return best;
+    }
 
     class OfficeScene extends Phaser.Scene {
       constructor() {
@@ -348,17 +489,14 @@
           this._addBreathing(s, { x: agent.homeX, y: agent.homeY });
 
           // Stash a handle for the SSE event handler
-          const stationRaw = agent.stations && agent.stations.work;
-          const gatesRaw = agent.gatePoints || (agent.gatePoint ? [agent.gatePoint] : null);
           agentMap[agent.id] = {
             id: agent.id,
             sprite: s,
             home: { x: agent.homeX, y: agent.homeY, idleFrame: safeIdle },
-            station: stationRaw ? { x: stationRaw.x, y: stationRaw.y } : null,
-            gatePoints: gatesRaw ? gatesRaw.map(g => ({ x: g.x, y: g.y })) : null,
-            busy: false,
-            idleBusy: false,
-            idleTimer: null
+            homeWaypoint: agent.homeWaypoint || null,
+            workStations: Array.isArray(agent.workStations) ? agent.workStations.slice() : [],
+            kontrollgang: Array.isArray(agent.kontrollgang) ? agent.kontrollgang.slice() : [],
+            busy: false
           };
 
           // Name chip floating above the sprite — tracked per-frame so it follows
@@ -414,10 +552,10 @@
           }
         });
 
-        // ── Sporadic idle behavior for all non-Paul agents (Phase 7C FIX 3).
-        // Paul stays back-to-room at the conference table; the others occasionally
-        // wander to the couch, glance at the lounge whiteboard, or shift in place.
-        Object.values(agentMap).forEach(a => this._startIdleBehavior(a));
+        // Phase 7D: Idle = stehen am Konferenztisch. Kein sporadisches Wandern mehr;
+        // alle Bewegung läuft nun über den Waypoint-Graph (Work-Events / Kontrollgang).
+        // Phase-7C-Idle-Wander wurde entfernt, weil er kollisionsblind quer durch
+        // Couch und Lounge-Whiteboard lief.
 
         // Debug exposure for headless tests (Phase 7B verify step).
         if (DEBUG) {
@@ -614,69 +752,150 @@
           this._paulGesture(map.paul, agentId);
         }
 
-        if (action === "code.write" || action === "code.bash") {
-          this._actionWalkToStation(data, action);
-        } else if (action === "git.push") {
-          this._actionGitPush(data);
+        if (data.id === "porthos") {
+          this._actionPorthosKontrollgang(data);
+        } else if (action === "code.write" || action === "code.bash" || action === "git.push") {
+          this._actionWalkToStation(data);
         } else {
           console.log("[office] unknown action, bubble only:", action);
         }
       }
 
-      // Phase 7B.9: traverse a list of waypoints (home → gates… → station, then reverse).
-      // Routes around walls when home is in big room and station is in a walled-off work room.
-      _actionWalkToStation(data, action) {
-        const { sprite, home, station, gatePoints } = data;
-        if (!station) return;
-        // If mid-idle (couch/whiteboard/wander), preempt it: kill its tween + timer
-        // and continue with the event walk from the agent's current position.
-        if (data.idleBusy) this._cancelIdle(data);
-        if (data.busy) return;
-
-        data.busy = true;
-        this.tweens.killTweensOf(sprite);
-
-        const dur = 1000;
-        const id = data.id;
-        const segment = (fx, fy, tx, ty, onDone) => {
+      // ── Phase 7D: Waypoint-Routing Helpers ──
+      // Promise-wrapped tween für einen einzelnen Walk-Segment (gerade Linie
+      // zwischen zwei benachbarten Waypoints). Wählt die Walk-Animation nach
+      // dem stärkeren Delta (links/rechts/oben/unten).
+      _walkSegmentAsync(data, fx, fy, tx, ty) {
+        return new Promise((resolve) => {
+          const sprite = data.sprite;
           const dx = tx - fx, dy = ty - fy;
+          if (Math.abs(dx) < 1 && Math.abs(dy) < 1) { resolve(); return; }
           const dir = Math.abs(dy) >= Math.abs(dx)
             ? (dy < 0 ? "up" : "down")
             : (dx < 0 ? "left" : "right");
-          const key = `${id}-walk-${dir}`;
+          const key = `${data.id}-walk-${dir}`;
           if (this.anims.exists(key)) sprite.play(key);
+          // Speed: ~150 px/s — gleich für alle Figuren, gleich für alle Segmente.
+          const dist = Math.hypot(dx, dy);
+          const dur = Math.max(220, Math.round(dist * 6.5));
           this.tweens.add({
             targets: sprite, x: tx, y: ty, duration: dur, ease: "Sine.inOut",
-            onComplete: onDone
+            onComplete: () => resolve()
           });
-        };
-        const traverse = (pts, onDone) => {
-          let cur = { x: sprite.x, y: sprite.y };
-          let i = 0;
-          const next = () => {
-            if (i >= pts.length) { onDone(); return; }
-            const wp = pts[i++];
-            segment(cur.x, cur.y, wp.x, wp.y, () => { cur = wp; next(); });
-          };
-          next();
-        };
-        const resume = () => {
-          sprite.stop();
-          sprite.setFrame(home.idleFrame);
-          sprite.setPosition(home.x, home.y);
-          this._addBreathing(sprite, home);
-          data.busy = false;
-          this._scheduleNextIdle(data);
-        };
-
-        const out  = gatePoints ? [...gatePoints, station] : [station];
-        const back = gatePoints ? [...[...gatePoints].reverse(), home] : [home];
-
-        traverse(out, () => {
-          sprite.stop();
-          sprite.setFrame(home.idleFrame);
-          this.time.delayedCall(800, () => traverse(back, resume));
         });
+      }
+
+      // Läuft eine Folge von Waypoint-Keys ab. Startpunkt = aktuelle Sprite-Position
+      // (NICHT der erste Waypoint im Pfad — wir laufen VON der aktuellen Position
+      // zum ersten Waypoint, dann weiter). Beispiel: Pfad ["A","B","C"] aus BFS
+      // bedeutet "ich bin gerade an A oder in dessen Nähe", also iterieren wir
+      // von Index 0 weiter und tweenen zur Sprite-Position-START → A → B → C.
+      async _traversePath(data, pathKeys) {
+        if (!pathKeys || !pathKeys.length) return;
+        const sprite = data.sprite;
+        for (let i = 0; i < pathKeys.length; i++) {
+          if (!data.busy) return; // preempted
+          const wp = WAYPOINTS[pathKeys[i]];
+          if (!wp) continue;
+          await this._walkSegmentAsync(data, sprite.x, sprite.y, wp.x, wp.y);
+        }
+      }
+
+      _pauseAsync(ms) {
+        return new Promise((resolve) => this.time.delayedCall(ms, () => resolve()));
+      }
+
+      _settleIdleAtHome(data) {
+        const { sprite, home } = data;
+        sprite.stop();
+        sprite.setFrame(home.idleFrame);
+        sprite.setPosition(home.x, home.y);
+        this._addBreathing(sprite, home);
+      }
+
+      // Standard-Arbeits-Walk für Paul/D'Art/Aramis:
+      //   Aktuelle Position → BFS → erste Station → (optionales Pendeln zwischen
+      //   weiteren Stationen für die Arbeits-Dauer) → BFS → Home → Idle.
+      async _actionWalkToStation(data) {
+        if (!data.workStations || !data.workStations.length) return;
+        if (data.busy) return;
+        data.busy = true;
+        this.tweens.killTweensOf(data.sprite);
+
+        const sprite = data.sprite;
+        const stations = data.workStations;
+        const startWp = findNearestWaypoint(sprite.x, sprite.y);
+
+        // Hinweg: aktuelle Position → erste Station
+        const pathOut = findPath(startWp, stations[0]);
+        if (!pathOut) {
+          console.warn("[office] kein Pfad", startWp, "→", stations[0]);
+          data.busy = false; return;
+        }
+        await this._traversePath(data, pathOut);
+        if (!data.busy) return;
+
+        sprite.stop();
+        sprite.setFrame(data.home.idleFrame);
+
+        // Arbeits-Dauer: 7-10 s. Bei ≥2 Stationen alle ~2 s zur nächsten pendeln.
+        const workDuration = 7000 + Math.random() * 3000;
+        const pendelEvery = 2000;
+        const startTime = this.time.now;
+        let currentIdx = 0;
+        while (data.busy && (this.time.now - startTime) < workDuration) {
+          await this._pauseAsync(pendelEvery);
+          if (!data.busy) return;
+          if (stations.length >= 2) {
+            const nextIdx = (currentIdx + 1) % stations.length;
+            const pathPendel = findPath(stations[currentIdx], stations[nextIdx]);
+            if (pathPendel) await this._traversePath(data, pathPendel);
+            currentIdx = nextIdx;
+            if (data.busy) { sprite.stop(); sprite.setFrame(data.home.idleFrame); }
+          }
+        }
+
+        // Rückweg: aktuelle Station → Home-Waypoint
+        const pathBack = findPath(stations[currentIdx], data.homeWaypoint);
+        if (pathBack) await this._traversePath(data, pathBack);
+
+        this._settleIdleAtHome(data);
+        data.busy = false;
+      }
+
+      // Porthos: Kontrollgang nacheinander durch ALLE konfigurierten Räume,
+      // an jedem Stop kurz pausieren, dann zurück zum Konferenztisch.
+      async _actionPorthosKontrollgang(data) {
+        if (!data.kontrollgang || !data.kontrollgang.length) return;
+        if (data.busy) return;
+        data.busy = true;
+        this.tweens.killTweensOf(data.sprite);
+
+        const sprite = data.sprite;
+        let currentWp = findNearestWaypoint(sprite.x, sprite.y);
+
+        for (const stopWp of data.kontrollgang) {
+          if (!data.busy) return;
+          const path = findPath(currentWp, stopWp);
+          if (!path) {
+            console.warn("[office] kontrollgang: kein Pfad", currentWp, "→", stopWp);
+            continue;
+          }
+          await this._traversePath(data, path);
+          if (!data.busy) return;
+          sprite.stop();
+          sprite.setFrame(data.home.idleFrame);
+          await this._pauseAsync(1600 + Math.random() * 600);
+          currentWp = stopWp;
+        }
+
+        if (data.busy) {
+          const pathBack = findPath(currentWp, data.homeWaypoint);
+          if (pathBack) await this._traversePath(data, pathBack);
+        }
+
+        this._settleIdleAtHome(data);
+        data.busy = false;
       }
 
       // Reactive "ich teile einen Auftrag aus"-Geste: Paul wechselt für 600ms in die
@@ -713,145 +932,6 @@
                 this._addBreathing(sprite, home);
                 paulData.busy = false;
               }
-            });
-          }
-        });
-      }
-
-      // ── Sporadic idle behavior (Phase 7C FIX 3).
-      // Non-Paul agents occasionally leave their idle home to do something small —
-      // sit on the couch, glance at the lounge whiteboard, or shift a couple of
-      // tiles and come back. Timer fires every 9–22s; if the agent is busy with an
-      // event walk, the tick is skipped and rescheduled. Any incoming event
-      // preempts the idle action via _cancelIdle().
-      _startIdleBehavior(agentData) {
-        if (agentData.id === "paul") return;
-        this._scheduleNextIdle(agentData);
-      }
-
-      _scheduleNextIdle(agentData) {
-        if (agentData.id === "paul") return;
-        if (agentData.idleTimer) { agentData.idleTimer.remove(); agentData.idleTimer = null; }
-        const delay = 9000 + Math.random() * 13000;
-        agentData.idleTimer = this.time.delayedCall(delay, () => {
-          agentData.idleTimer = null;
-          if (agentData.busy) { this._scheduleNextIdle(agentData); return; }
-          this._performIdleAction(agentData);
-        });
-      }
-
-      _cancelIdle(agentData) {
-        if (agentData.idleTimer) { agentData.idleTimer.remove(); agentData.idleTimer = null; }
-        if (agentData.idleBusy) {
-          this.tweens.killTweensOf(agentData.sprite);
-          agentData.idleBusy = false;
-          agentData.busy = false;
-        }
-      }
-
-      _performIdleAction(agentData) {
-        // Weighted choice: 50% small shift, 25% couch, 25% lounge whiteboard.
-        // Shifts are quick and look like fidgeting; couch/whiteboard are longer trips.
-        const r = Math.random();
-        let target, pauseMs;
-        if (r < 0.5) {
-          // Small wander near home
-          const dx = (Math.random() - 0.5) * 120;
-          const dy = (Math.random() - 0.5) * 60;
-          target = { x: agentData.home.x + dx, y: agentData.home.y + dy };
-          pauseMs = 1500 + Math.random() * 2000;
-        } else if (r < 0.75) {
-          // Couch in lounge — three seat slots so multiple agents don't pile up
-          const seats = [{ x: 840, y: 600 }, { x: 888, y: 600 }, { x: 936, y: 600 }];
-          target = seats[Math.floor(Math.random() * seats.length)];
-          pauseMs = 5500 + Math.random() * 4000;
-        } else {
-          // Glance at the lounge whiteboard (placeDisplayBoard anchor 1160, 504)
-          target = { x: 1184, y: 624 };
-          pauseMs = 2200 + Math.random() * 1800;
-        }
-        this._idleWalkTo(agentData, target.x, target.y, pauseMs);
-      }
-
-      _idleWalkTo(agentData, tx, ty, pauseMs) {
-        const { sprite, home, id } = agentData;
-        if (agentData.busy) { this._scheduleNextIdle(agentData); return; }
-        agentData.busy = true;
-        agentData.idleBusy = true;
-        this.tweens.killTweensOf(sprite);
-
-        const walk = (fx, fy, gx, gy, onDone) => {
-          const dx = gx - fx, dy = gy - fy;
-          if (Math.abs(dx) < 2 && Math.abs(dy) < 2) { onDone(); return; }
-          const dir = Math.abs(dy) >= Math.abs(dx)
-            ? (dy < 0 ? "up" : "down")
-            : (dx < 0 ? "left" : "right");
-          const key = `${id}-walk-${dir}`;
-          if (this.anims.exists(key)) sprite.play(key);
-          const dist = Math.hypot(dx, dy);
-          const dur = Math.max(400, dist * 7);
-          this.tweens.add({
-            targets: sprite, x: gx, y: gy, duration: dur, ease: "Sine.inOut",
-            onComplete: onDone
-          });
-        };
-
-        walk(sprite.x, sprite.y, tx, ty, () => {
-          if (!agentData.idleBusy) return; // preempted
-          sprite.stop();
-          sprite.setFrame(home.idleFrame);
-          this.time.delayedCall(pauseMs, () => {
-            if (!agentData.idleBusy) return; // preempted during pause
-            walk(sprite.x, sprite.y, home.x, home.y, () => {
-              if (!agentData.idleBusy) return;
-              sprite.stop();
-              sprite.setFrame(home.idleFrame);
-              sprite.setPosition(home.x, home.y);
-              this._addBreathing(sprite, home);
-              agentData.idleBusy = false;
-              agentData.busy = false;
-              this._scheduleNextIdle(agentData);
-            });
-          });
-        });
-      }
-
-      _actionGitPush(data) {
-        const { sprite, home } = data;
-        if (data.idleBusy) this._cancelIdle(data);
-        if (data.busy) return;
-        data.busy = true;
-        const targetY = home.y + 200; // off-canvas downwards
-
-        this.tweens.killTweensOf(sprite);
-        sprite.setPosition(home.x, home.y);
-
-        const walkKey = `${sprite.texture.key.replace("char_", "")}-walk-down`;
-        if (this.anims.exists(walkKey)) sprite.play(walkKey);
-
-        this.tweens.add({
-          targets: sprite,
-          y: targetY,
-          duration: 900,
-          ease: "Sine.in",
-          onComplete: () => {
-            sprite.setVisible(false);
-            this.time.delayedCall(3000, () => {
-              sprite.setPosition(home.x, home.y);
-              sprite.setFrame(home.idleFrame);
-              sprite.setAlpha(0);
-              sprite.setVisible(true);
-              this.tweens.add({
-                targets: sprite,
-                alpha: 1,
-                duration: 400,
-                ease: "Sine.out",
-                onComplete: () => {
-                  this._addBreathing(sprite, home);
-                  data.busy = false;
-                  this._scheduleNextIdle(data);
-                }
-              });
             });
           }
         });
