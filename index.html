@@ -32,7 +32,7 @@
 <body>
   <div id="game"></div>
   <script>
-    const BUILD_VERSION = "2026-05-22T20:30:00Z";
+    const BUILD_VERSION = "2026-05-22T22:15:00Z";
 
     // ── Phase 3: SSE endpoint + action handlers
     // Frontend is READ-ONLY: subscribes to /events, never POSTs.
@@ -271,6 +271,107 @@
       return best;
     }
 
+    // ── Phase 7E: Arbeits-Haltung an Stationen ──
+    // Pro Station: in welche Richtung schaut die Figur während der Arbeit?
+    // (Verwendet den ersten Frame des entsprechenden walk-direction-Loops als
+    // Stand-Pose. Bob-Tween macht es lebendig.)
+    const STATION_FACING = {
+      SR_DESK_PC:      "up",     // D'Art schaut zum Monitor (Desk nördlich)
+      SR_RACK_INSPECT: "left",   // D'Art inspiziert Rack-Cluster (westlich)
+      FR_DESK_PC:      "up",     // Aramis am Monitor
+      FR_DISPLAY:      "up",     // Aramis vor Display-Board (nördlich)
+      LG_WHITEBOARD:   "up",     // Paul vor Lounge-Whiteboard (nördlich)
+      TS_WB:           "up"      // Porthos vor Testing-Whiteboard (nördlich)
+    };
+
+    // Pixel-Icons pro Agent. 8-Zeilen ASCII-Pattern, '#' = gefülltes Pixel.
+    // Werden zur Laufzeit mit Phaser.Graphics als Pixel-Rechtecke gerendert.
+    const ICON_PATTERNS = {
+      dartagnan: [        // Zahnrad (Server-Ops)
+        "..####..",
+        ".######.",
+        "##.##.##",
+        "##....##",
+        "##....##",
+        "##.##.##",
+        ".######.",
+        "..####.."
+      ],
+      aramis: [           // </> (Code-Klammer)
+        "..#...#.",
+        ".#...#..",
+        "#...#...",
+        ".#..#...",
+        "..#.#...",
+        ".#...#..",
+        "..#...#.",
+        "........"
+      ],
+      paul: [             // Stift (Whiteboard/Marker)
+        "......##",
+        ".....##.",
+        "....##..",
+        "...##...",
+        "..##....",
+        ".##.....",
+        "##......",
+        "#......."
+      ],
+      porthos: [          // Lupe (QA/Kontrolle)
+        ".####...",
+        "#....#..",
+        "#....#..",
+        "#....#..",
+        ".####...",
+        "....#...",
+        ".....#..",
+        "......#."
+      ]
+    };
+
+    const ICON_FILL_BY_AGENT = {
+      dartagnan: 0x7fb8ff,   // hellblau (Server)
+      aramis:    0xff9999,   // rosa-ton (Frontend)
+      paul:      0xfcd34d,   // gold (CEO)
+      porthos:   0xa5e065    // grün (QA)
+    };
+    const ICON_BORDER = 0x1a1a22; // dunkler Rahmen für Kontrast auf weißem Boden
+    const ICON_PIXSIZE = 3;       // 8×8-Pattern × 3 → 24×24-Icon
+
+    function drawAgentIcon(scene, agentId) {
+      const pattern = ICON_PATTERNS[agentId];
+      const fill = ICON_FILL_BY_AGENT[agentId] || 0xfffbe8;
+      if (!pattern) return null;
+      const g = scene.add.graphics();
+      const h = pattern.length;
+      const w = pattern[0].length;
+      const ox = -w * ICON_PIXSIZE / 2;
+      const oy = -h * ICON_PIXSIZE / 2;
+      // 1px-Border-Plate: jedes #-Pixel kriegt einen dunklen Rahmen, der die
+      // einzelnen Pixel zusammen wirken lässt und Kontrast gegen Weiß gibt.
+      g.fillStyle(ICON_BORDER, 1);
+      for (let y = 0; y < h; y++) {
+        const row = pattern[y];
+        for (let x = 0; x < row.length; x++) {
+          if (row[x] === '#') {
+            g.fillRect(ox + x * ICON_PIXSIZE - 1, oy + y * ICON_PIXSIZE - 1,
+                       ICON_PIXSIZE + 2, ICON_PIXSIZE + 2);
+          }
+        }
+      }
+      g.fillStyle(fill, 1);
+      for (let y = 0; y < h; y++) {
+        const row = pattern[y];
+        for (let x = 0; x < row.length; x++) {
+          if (row[x] === '#') {
+            g.fillRect(ox + x * ICON_PIXSIZE, oy + y * ICON_PIXSIZE,
+                       ICON_PIXSIZE, ICON_PIXSIZE);
+          }
+        }
+      }
+      return g;
+    }
+
     class OfficeScene extends Phaser.Scene {
       constructor() {
         super({ key: "OfficeScene" });
@@ -496,7 +597,18 @@
             homeWaypoint: agent.homeWaypoint || null,
             workStations: Array.isArray(agent.workStations) ? agent.workStations.slice() : [],
             kontrollgang: Array.isArray(agent.kontrollgang) ? agent.kontrollgang.slice() : [],
-            busy: false
+            // First frame of each walk direction = "facing X, standing still" pose.
+            // Used for working at stations + Kontrollgang stops (Phase 7E).
+            facingFrames: {
+              up:    (agent.walkUpFrames    || [safeIdle])[0],
+              down:  (agent.walkDownFrames  || [safeIdle])[0],
+              left:  (agent.walkLeftFrames  || [safeIdle])[0],
+              right: (agent.walkRightFrames || [safeIdle])[0]
+            },
+            busy: false,
+            workBobTween: null,
+            workBaseY: null,
+            workIcon: null
           };
 
           // Name chip floating above the sprite — tracked per-frame so it follows
@@ -813,6 +925,78 @@
         this._addBreathing(sprite, home);
       }
 
+      // Phase 7E: Arbeits-Haltung an einer Station.
+      //   - Sprite dreht sich zur Station (via STATION_FACING + facingFrames)
+      //   - dezente Bob-Tween (3px vertikal, 700ms, yoyo, loop)
+      //   - Pixel-Icon (Zahnrad/</> /Stift/Lupe) erscheint oben-rechts über dem Kopf
+      //     mit Pulse-Tween. Tracker im _liveWorkIcons-Array lässt das Icon
+      //     dem Sprite folgen (analog zu _liveBubbles).
+      _startWorkingAt(data, stationKey) {
+        this._stopWorking(data); // defensiv: doppelten Start verhindern
+        const { sprite } = data;
+        const facing = STATION_FACING[stationKey] || "up";
+        const frame  = data.facingFrames && data.facingFrames[facing];
+        sprite.stop();
+        if (typeof frame === "number") sprite.setFrame(frame);
+        // Breathing-Loop (aus _settleIdleAtHome) abräumen, sonst überlagert sich's
+        this.tweens.killTweensOf(sprite);
+        data.workBaseY = sprite.y;
+        data.workBobTween = this.tweens.add({
+          targets: sprite, y: sprite.y - 3,
+          duration: 700, yoyo: true, repeat: -1, ease: "Sine.inOut"
+        });
+        // Activity-Icon
+        const icon = drawAgentIcon(this, data.id);
+        if (icon) {
+          icon.setDepth(2050); // unter Bubble (2100), über alles andere
+          icon.setAlpha(0);
+          // Default: oben-rechts über dem Kopf (Bubble bleibt centered & klar).
+          // Aber wenn der Sprite nah am oberen Canvas-Rand ist (Stationen
+          // SR_DESK_PC/FR_DESK_PC bei y=120), würde Y=-140 off-canvas landen
+          // → dann Icon UNTER den Kopf legen (sprite.y + 14 statt -140).
+          const OFFSET_X = 28;
+          const FLIP_Y_THRESHOLD = 160; // sprite.y darunter → flip
+          const OFFSET_Y = (sprite.y < FLIP_Y_THRESHOLD) ? 14 : -140;
+          icon.setPosition(sprite.x + OFFSET_X, sprite.y + OFFSET_Y);
+          this.tweens.add({ targets: icon, alpha: 1, duration: 200, ease: "Sine.out" });
+          // Pulse: leichte Skalierung
+          const pulseTween = this.tweens.add({
+            targets: icon, scale: 1.15, duration: 600,
+            yoyo: true, repeat: -1, ease: "Sine.inOut"
+          });
+          data.workIcon = { graphic: icon, pulseTween, offsetX: OFFSET_X, offsetY: OFFSET_Y };
+          if (!this._liveWorkIcons) this._liveWorkIcons = [];
+          this._liveWorkIcons.push({ icon: data.workIcon, sprite });
+        }
+      }
+
+      _stopWorking(data) {
+        const { sprite } = data;
+        if (data.workBobTween) {
+          data.workBobTween.stop();
+          data.workBobTween = null;
+        }
+        if (typeof data.workBaseY === "number") {
+          sprite.y = data.workBaseY;
+          data.workBaseY = null;
+        }
+        if (data.workIcon) {
+          const wi = data.workIcon;
+          if (wi.pulseTween) wi.pulseTween.stop();
+          if (this._liveWorkIcons) {
+            const idx = this._liveWorkIcons.findIndex(e => e.icon === wi);
+            if (idx >= 0) this._liveWorkIcons.splice(idx, 1);
+          }
+          if (wi.graphic) {
+            this.tweens.add({
+              targets: wi.graphic, alpha: 0, duration: 150, ease: "Sine.in",
+              onComplete: () => wi.graphic.destroy()
+            });
+          }
+          data.workIcon = null;
+        }
+      }
+
       // Standard-Arbeits-Walk für Paul/D'Art/Aramis:
       //   Aktuelle Position → BFS → erste Station → (optionales Pendeln zwischen
       //   weiteren Stationen für die Arbeits-Dauer) → BFS → Home → Idle.
@@ -835,27 +1019,30 @@
         await this._traversePath(data, pathOut);
         if (!data.busy) return;
 
-        sprite.stop();
-        sprite.setFrame(data.home.idleFrame);
+        // An Station angekommen: Arbeits-Haltung + Icon
+        this._startWorkingAt(data, stations[0]);
 
         // Arbeits-Dauer: 7-10 s. Bei ≥2 Stationen alle ~2 s zur nächsten pendeln.
         const workDuration = 7000 + Math.random() * 3000;
         const pendelEvery = 2000;
-        const startTime = this.time.now;
+        const startTime = Date.now();
         let currentIdx = 0;
-        while (data.busy && (this.time.now - startTime) < workDuration) {
+        while (data.busy && (Date.now() - startTime) < workDuration) {
           await this._pauseAsync(pendelEvery);
-          if (!data.busy) return;
+          if (!data.busy) { this._stopWorking(data); return; }
           if (stations.length >= 2) {
             const nextIdx = (currentIdx + 1) % stations.length;
+            // Vor dem Pendel-Walk: Working-Pose abbauen (Bob killen, Icon weg)
+            this._stopWorking(data);
             const pathPendel = findPath(stations[currentIdx], stations[nextIdx]);
             if (pathPendel) await this._traversePath(data, pathPendel);
             currentIdx = nextIdx;
-            if (data.busy) { sprite.stop(); sprite.setFrame(data.home.idleFrame); }
+            if (data.busy) this._startWorkingAt(data, stations[currentIdx]);
           }
         }
 
-        // Rückweg: aktuelle Station → Home-Waypoint
+        // Arbeit fertig: Pose abbauen, dann Rückweg
+        this._stopWorking(data);
         const pathBack = findPath(stations[currentIdx], data.homeWaypoint);
         if (pathBack) await this._traversePath(data, pathBack);
 
@@ -875,17 +1062,18 @@
         let currentWp = findNearestWaypoint(sprite.x, sprite.y);
 
         for (const stopWp of data.kontrollgang) {
-          if (!data.busy) return;
+          if (!data.busy) { this._stopWorking(data); return; }
           const path = findPath(currentWp, stopWp);
           if (!path) {
             console.warn("[office] kontrollgang: kein Pfad", currentWp, "→", stopWp);
             continue;
           }
           await this._traversePath(data, path);
-          if (!data.busy) return;
-          sprite.stop();
-          sprite.setFrame(data.home.idleFrame);
+          if (!data.busy) { this._stopWorking(data); return; }
+          // An jedem Stop: Lupe + Bob für die kurze Inspektions-Pause
+          this._startWorkingAt(data, stopWp);
           await this._pauseAsync(1600 + Math.random() * 600);
+          this._stopWorking(data);
           currentWp = stopWp;
         }
 
@@ -1019,6 +1207,16 @@
             const c = chips[i];
             if (c.text && c.text.active && c.sprite && c.sprite.active) {
               c.text.setPosition(c.sprite.x, c.sprite.y + c.offset);
+            }
+          }
+        }
+        const icons = this._liveWorkIcons;
+        if (icons && icons.length) {
+          for (let i = 0; i < icons.length; i++) {
+            const e = icons[i];
+            const g = e.icon && e.icon.graphic;
+            if (g && g.active && e.sprite && e.sprite.active) {
+              g.setPosition(e.sprite.x + e.icon.offsetX, e.sprite.y + e.icon.offsetY);
             }
           }
         }
