@@ -10,3 +10,10 @@ phase*.png
 *-review.png
 # Local scratch dir used for deploys — may contain secrets pulled from the VPS
 tmp/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
